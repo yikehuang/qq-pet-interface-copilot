@@ -64,11 +64,14 @@ English: A PC-side QQ pet automation assistant under active validation. It reuse
 
 双击 `start-interface-copilot.bat`，启动器会依次完成：
 
-1. 检查 NapCat 完整运行环境和本机 OneBot 接口。
-2. NapCat 未安装时，直接从官方 GitHub 下载 `NapCat.Shell.Windows.Node.zip`，核对 GitHub Release 提供的 SHA-256，并自动解压到当前用户的应用数据目录。
-3. 直接启动完整 NapCat 环境；尚未登录时会等待二维码 PNG 写入完整后在助手内显示，避免 Windows 图片查看器过早打开损坏文件；NapCat 提前退出时会展示退出码和启动日志，不会再安装或弹出 NapCatQQ Desktop 管理器。
-4. 从 NapCat `get_login_info` 读取当前 QQ 账号，从本机 NapCat 配置读取接口端口和令牌；若尚未配置 HTTP 服务，会仅增加一个随机令牌、仅监听 `127.0.0.1` 的本机接口。
-5. 验证宠物状态后保存本机配置并打开控制台。
+1. 检查 Microsoft VC++ 2015–2022 x64 必备运行库；缺失时只从 Microsoft 官方地址下载，验证 Authenticode 数字签名后静默安装。
+2. 检查 NapCat 完整运行环境和本机 OneBot 接口。
+3. NapCat 未安装时，直接从官方 GitHub 下载 `NapCat.Shell.Windows.Node.zip`，核对 GitHub Release 提供的 SHA-256，并自动解压到当前用户的应用数据目录。
+4. 直接启动完整 NapCat 环境；尚未登录时会等待二维码 PNG 写入完整后在助手内显示，避免 Windows 图片查看器过早打开损坏文件；NapCat 提前退出时会展示退出码和启动日志，不会再安装或弹出 NapCatQQ Desktop 管理器。
+5. 从 NapCat `get_login_info` 读取当前 QQ 账号，从本机 NapCat 配置读取接口端口和令牌；若尚未配置 HTTP 服务，会仅增加一个随机令牌、仅监听 `127.0.0.1` 的本机接口。
+6. 验证宠物状态后保存本机配置并打开控制台。
+
+Release 中的 `QQ宠物助手.exe` 已内置 Python、Tcl/Tk 图形界面、HTTPS/证书、加密和 OnePush 通知依赖，普通用户不需要另外安装 Python 或执行 `pip install`。电脑只需使用 Windows x64，并安装可正常登录的电脑版 QQ；缺少的 VC++ 运行库和 NapCat 由上述一键流程补齐。
 
 首次接入时，启动器会通过当前电脑版 QQ 会话调用本人资料接口，直接从服务器读取并校验 `petId`，随后自动保存，不再要求手机、ADB 或手工填写。控制台的“连接与账号”设置中也提供“从服务器一键读取并保存宠物 ID”按钮。启动器不会导出 QQ 会话，也不会把接口令牌上传到网络。
 

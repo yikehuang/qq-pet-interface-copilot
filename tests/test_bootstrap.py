@@ -13,6 +13,7 @@ from qqpet_app.bootstrap import (
     RuntimeAsset,
     configure_local_onebot,
     endpoints_from_config,
+    ensure_vc_runtime,
     install_napcat_runtime,
     is_managed_runtime,
     login_qrcode_path,
@@ -152,6 +153,35 @@ class BootstrapTests(unittest.TestCase):
                 b"\x89PNG\r\n\x1a\n" + b"x" * 512 + b"\x00\x00\x00\x00IEND\xaeB`\x82"
             )
             self.assertEqual(login_qrcode_path(), qr)
+
+    @mock.patch("qqpet_app.bootstrap.vc_runtime_installed", return_value=True)
+    def test_vc_runtime_install_is_skipped_when_already_available(self, installed):
+        messages = []
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertFalse(ensure_vc_runtime(Path(directory), messages.append))
+        installed.assert_called_once_with()
+        self.assertTrue(any("已就绪" in message for message in messages))
+
+    @unittest.skipUnless(os.name == "nt", "Windows VC++ runtime installer")
+    @mock.patch("qqpet_app.bootstrap.subprocess.run")
+    @mock.patch("qqpet_app.bootstrap._verify_microsoft_signature")
+    @mock.patch("qqpet_app.bootstrap.urllib.request.urlretrieve")
+    @mock.patch("qqpet_app.bootstrap.vc_runtime_installed", side_effect=[False, True])
+    def test_vc_runtime_is_downloaded_verified_and_installed(
+        self, installed, download, verify, run
+    ):
+        run.return_value = mock.Mock(returncode=0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertFalse(ensure_vc_runtime(root))
+            installer = root / "vc_redist.x64.exe"
+            download.assert_called_once()
+            verify.assert_called_once_with(installer)
+            command = run.call_args.args[0]
+            self.assertEqual(command[0], str(installer))
+            self.assertIn("/quiet", command)
+            self.assertIn("/norestart", command)
+        self.assertEqual(installed.call_count, 2)
 
 
 if __name__ == "__main__":

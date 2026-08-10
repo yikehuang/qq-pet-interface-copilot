@@ -22,6 +22,7 @@ NAPCAT_RUNTIME_ASSET = "NapCat.Shell.Windows.Node.zip"
 NAPCAT_CONFIG_RELATIVE = Path("runtime") / "NapCatQQ" / "config"
 NAPCAT_DIRECT_CONFIG_RELATIVE = Path("napcat") / "config"
 DEFAULT_ONEBOT_PORT = 6201
+VC_RUNTIME_URL = "https://aka.ms/vc14/vc_redist.x64.exe"
 
 
 @dataclass(frozen=True)
@@ -261,6 +262,112 @@ def find_qq_path() -> Path | None:
         if path.is_file():
             return path.resolve()
     return None
+
+
+def vc_runtime_installed() -> bool:
+    """Return whether the supported Visual C++ v14 x64 runtime is installed."""
+    if os.name != "nt":
+        return True
+    try:
+        import winreg
+    except ImportError:
+        return False
+    key_name = r"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+    access_modes = (winreg.KEY_READ | winreg.KEY_WOW64_64KEY, winreg.KEY_READ)
+    for access in access_modes:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_name, 0, access) as key:
+                installed, _ = winreg.QueryValueEx(key, "Installed")
+                major, _ = winreg.QueryValueEx(key, "Major")
+                if int(installed) == 1 and int(major) >= 14:
+                    return True
+        except (OSError, TypeError, ValueError):
+            continue
+    return False
+
+
+def _verify_microsoft_signature(path: Path) -> None:
+    powershell = (
+        Path(os.environ.get("WINDIR") or r"C:\Windows")
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    if not powershell.is_file():
+        raise RuntimeError("无法调用 Windows 签名验证组件，已停止安装 VC++ 运行库")
+    signature_env = os.environ.copy()
+    signature_env["PSModulePath"] = str(
+        powershell.parent / "Modules"
+    )
+    signature_env["QQPET_SIGNATURE_TARGET"] = str(path)
+    script = (
+        "$s=Get-AuthenticodeSignature -LiteralPath $env:QQPET_SIGNATURE_TARGET;"
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;"
+        "Write-Output ($s.Status.ToString()+'|'+$s.SignerCertificate.Subject)"
+    )
+    result = subprocess.run(
+        [str(powershell), "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=signature_env,
+        timeout=30,
+        check=False,
+    )
+    proof = result.stdout.strip()
+    if result.returncode != 0 or not proof.startswith("Valid|"):
+        raise RuntimeError("VC++ 运行库安装包的 Microsoft 数字签名无效，已停止安装")
+    if "Microsoft Corporation" not in proof:
+        raise RuntimeError("VC++ 运行库安装包的发布者不是 Microsoft，已停止安装")
+
+
+def ensure_vc_runtime(
+    target_dir: Path,
+    progress: Callable[[str], None] | None = None,
+) -> bool:
+    """Install Microsoft's required x64 runtime when a fresh PC lacks it.
+
+    Returns True when Windows reports that a restart is recommended.
+    """
+    notify = progress or (lambda _message: None)
+    if vc_runtime_installed():
+        notify("Microsoft VC++ 2015–2022 x64 运行库已就绪。")
+        return False
+    if os.name != "nt":
+        raise RuntimeError("VC++ 运行库自动安装仅支持 Windows")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    installer = target_dir / "vc_redist.x64.exe"
+    notify("正在从 Microsoft 官方下载 VC++ 2015–2022 x64 运行库……")
+    urllib.request.urlretrieve(VC_RUNTIME_URL, installer)
+    _verify_microsoft_signature(installer)
+    notify("Microsoft 数字签名验证通过，正在安装必备运行库（可能出现 UAC 确认）……")
+    log_path = target_dir / "vc_redist-install.log"
+    result = subprocess.run(
+        [
+            str(installer),
+            "/install",
+            "/quiet",
+            "/norestart",
+            "/log",
+            str(log_path),
+        ],
+        timeout=300,
+        check=False,
+    )
+    if result.returncode not in (0, 1638, 3010):
+        raise RuntimeError(
+            f"VC++ 运行库安装失败（退出码 {result.returncode}），日志：{log_path}"
+        )
+    if not vc_runtime_installed():
+        raise RuntimeError(f"VC++ 运行库安装后未通过检测，请查看日志：{log_path}")
+    restart_required = result.returncode == 3010
+    notify(
+        "VC++ 必备运行库安装完成。"
+        + ("Windows 建议稍后重启。" if restart_required else "")
+    )
+    return restart_required
 
 
 def dependency_state(configured_url: str = "", configured_token: str = "") -> DependencyState:

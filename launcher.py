@@ -13,6 +13,7 @@ from tkinter import messagebox, simpledialog, ttk
 from qqpet_app.bootstrap import (
     active_sessions,
     dependency_state,
+    ensure_vc_runtime,
     ensure_napcat_runtime,
     login_qrcode_path,
     start_napcat,
@@ -115,6 +116,10 @@ class Launcher(tk.Tk):
     def _connect_worker(self) -> None:
         try:
             url, token, preferred_uin, pet_id = _configured_identity(self.store)
+            self.events.put(("log", "正在检查软件必备运行环境……"))
+            ensure_vc_runtime(
+                DOWNLOAD_DIR, lambda message: self.events.put(("log", message))
+            )
             self.events.put(("log", "正在检查电脑版 QQ、NapCat 和本机接口……"))
             state = dependency_state(url, token)
             if not state.napcat_root:
