@@ -330,7 +330,11 @@ def _free_local_port(preferred: int = DEFAULT_ONEBOT_PORT) -> int:
     raise RuntimeError("找不到可用的本机端口")
 
 
-def start_napcat(uin: str = "", qq_path: Path | None = None) -> subprocess.Popen:
+def start_napcat(
+    uin: str = "",
+    qq_path: Path | None = None,
+    log_path: Path | None = None,
+) -> subprocess.Popen:
     root = find_napcat_root()
     if not root:
         raise RuntimeError("尚未安装 NapCat 运行环境")
@@ -339,7 +343,17 @@ def start_napcat(uin: str = "", qq_path: Path | None = None) -> subprocess.Popen
         command = [str(root / "node.exe"), str(root / "index.js")]
         if uin.isdigit():
             command.extend(("-q", uin))
-        return subprocess.Popen(command, cwd=root, creationflags=creationflags)
+        if log_path is None:
+            return subprocess.Popen(command, cwd=root, creationflags=creationflags)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("ab") as stream:
+            return subprocess.Popen(
+                command,
+                cwd=root,
+                creationflags=creationflags,
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+            )
     runtime = root / "runtime" / "NapCatQQ"
     boot = runtime / "NapCatWinBootMain.exe"
     hook = runtime / "NapCatWinBootHook.dll"
@@ -351,7 +365,17 @@ def start_napcat(uin: str = "", qq_path: Path | None = None) -> subprocess.Popen
     command = [str(boot), str(qq), str(hook)]
     if uin.isdigit():
         command.append(uin)
-    return subprocess.Popen(command, cwd=runtime, creationflags=creationflags)
+    if log_path is None:
+        return subprocess.Popen(command, cwd=runtime, creationflags=creationflags)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("ab") as stream:
+        return subprocess.Popen(
+            command,
+            cwd=runtime,
+            creationflags=creationflags,
+            stdout=stream,
+            stderr=subprocess.STDOUT,
+        )
 
 
 def latest_napcat_runtime() -> RuntimeAsset:
@@ -534,7 +558,19 @@ def login_qrcode_path(root: Path | None = None) -> Path | None:
     if not selected or not is_managed_runtime(selected):
         return None
     path = selected / "napcat" / "cache" / "qrcode.png"
-    return path if path.is_file() else None
+    if not path.is_file():
+        return None
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    # NapCat writes the PNG directly. Waiting for both the header and IEND
+    # avoids opening a partially written file in Windows Photos.
+    if len(raw) < 256 or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    if b"IEND" not in raw[-32:]:
+        return None
+    return path
 
 
 def ensure_onebot_for_uin(uin: str) -> OneBotEndpoint:

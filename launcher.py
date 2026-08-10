@@ -33,6 +33,12 @@ DOWNLOAD_DIR = (
     / "QQPetInterfaceCopilot"
     / "downloads"
 )
+NAPCAT_STARTUP_LOG = (
+    Path(os.environ.get("LOCALAPPDATA") or ROOT)
+    / "QQPetInterfaceCopilot"
+    / "logs"
+    / "napcat-startup.log"
+)
 
 
 def _configured_identity(store: ConfigStore) -> tuple[str, str, str, str]:
@@ -133,13 +139,30 @@ class Launcher(tk.Tk):
             else:
                 self.events.put(("log", "NapCat 尚未在线，正在启动登录；如出现二维码请扫码确认。"))
                 login_started = time.time()
-                start_napcat(preferred_uin, state.qq_path)
+                napcat_process = start_napcat(
+                    preferred_uin, state.qq_path, NAPCAT_STARTUP_LOG
+                )
                 qr_shown = False
 
                 def show_qr_when_ready() -> None:
                     nonlocal qr_shown
                     if qr_shown:
                         return
+                    return_code = napcat_process.poll()
+                    if return_code not in (None, 0):
+                        detail = ""
+                        try:
+                            lines = NAPCAT_STARTUP_LOG.read_text(
+                                encoding="utf-8", errors="replace"
+                            ).splitlines()
+                            detail = "\n".join(lines[-8:]).strip()
+                        except OSError:
+                            pass
+                        message = f"NapCat 启动失败（退出码 {return_code}）"
+                        if detail:
+                            message += f"：\n{detail}"
+                        message += "\n请检查杀毒软件、QQ 版本和 VC++ x64 运行库。"
+                        raise RuntimeError(message)
                     qr_path = login_qrcode_path()
                     if qr_path and qr_path.stat().st_mtime >= login_started - 2:
                         qr_shown = True
@@ -223,11 +246,30 @@ class Launcher(tk.Tk):
                         self._save_pet_id(payload, value)
                 elif kind == "show_qr":
                     self.state_var.set("请使用手机 QQ 扫描登录二维码")
-                    self._append(f"登录二维码已打开：{payload}")
+                    self._append(f"登录二维码已生成：{payload}")
                     try:
-                        os.startfile(str(payload))
-                    except OSError as exc:
-                        self._append(f"无法自动打开二维码：{exc}")
+                        image = tk.PhotoImage(file=str(payload))
+                        window = tk.Toplevel(self)
+                        window.title("扫码登录 QQ")
+                        window.resizable(False, False)
+                        ttk.Label(
+                            window,
+                            text="请使用手机 QQ 扫描二维码并确认登录",
+                            font=("Microsoft YaHei UI", 11, "bold"),
+                        ).pack(padx=20, pady=(18, 10))
+                        label = ttk.Label(window, image=image)
+                        label.image = image
+                        label.pack(padx=20, pady=(0, 18))
+                        window.transient(self)
+                        window.lift()
+                        window.focus_force()
+                    except (OSError, tk.TclError) as exc:
+                        self._append(f"二维码显示失败，将继续等待并允许重试：{exc}")
+                        messagebox.showerror(
+                            "二维码显示失败",
+                            f"二维码文件已经生成，但无法显示：{exc}\n\n文件位置：{payload}",
+                            parent=self,
+                        )
                 elif kind == "launch":
                     self.state_var.set("连接成功，正在打开控制台……")
                     self.progress.stop()

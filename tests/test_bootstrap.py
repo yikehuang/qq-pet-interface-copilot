@@ -15,6 +15,7 @@ from qqpet_app.bootstrap import (
     endpoints_from_config,
     install_napcat_runtime,
     is_managed_runtime,
+    login_qrcode_path,
     napcat_config_dir,
     probe_login,
     start_napcat,
@@ -131,6 +132,26 @@ class BootstrapTests(unittest.TestCase):
             command = popen.call_args.args[0]
             self.assertEqual(command[-2:], ["-q", "123456"])
             self.assertEqual(popen.call_args.kwargs["cwd"], root)
+
+    @mock.patch("qqpet_app.bootstrap.find_napcat_root")
+    def test_qrcode_is_returned_only_after_png_is_complete(self, find_root):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "node.exe").write_bytes(b"node")
+            (root / "index.js").write_text("", encoding="utf-8")
+            (root / "napcat" / "config").mkdir(parents=True)
+            cache = root / "napcat" / "cache"
+            cache.mkdir()
+            qr = cache / "qrcode.png"
+            find_root.return_value = root
+
+            qr.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 512)
+            self.assertIsNone(login_qrcode_path())
+
+            qr.write_bytes(
+                b"\x89PNG\r\n\x1a\n" + b"x" * 512 + b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            self.assertEqual(login_qrcode_path(), qr)
 
 
 if __name__ == "__main__":

@@ -66,7 +66,7 @@ English: A PC-side QQ pet automation assistant under active validation. It reuse
 
 1. 检查 NapCat 完整运行环境和本机 OneBot 接口。
 2. NapCat 未安装时，直接从官方 GitHub 下载 `NapCat.Shell.Windows.Node.zip`，核对 GitHub Release 提供的 SHA-256，并自动解压到当前用户的应用数据目录。
-3. 直接启动完整 NapCat 环境；尚未登录时等待用户扫码确认，不会再安装或弹出 NapCatQQ Desktop 管理器。
+3. 直接启动完整 NapCat 环境；尚未登录时会等待二维码 PNG 写入完整后在助手内显示，避免 Windows 图片查看器过早打开损坏文件；NapCat 提前退出时会展示退出码和启动日志，不会再安装或弹出 NapCatQQ Desktop 管理器。
 4. 从 NapCat `get_login_info` 读取当前 QQ 账号，从本机 NapCat 配置读取接口端口和令牌；若尚未配置 HTTP 服务，会仅增加一个随机令牌、仅监听 `127.0.0.1` 的本机接口。
 5. 验证宠物状态后保存本机配置并打开控制台。
 
