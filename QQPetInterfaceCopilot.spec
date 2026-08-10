@@ -6,6 +6,7 @@ a = Analysis(
     binaries=[],
     datas=[],
     hiddenimports=[
+        "encodings.idna",
         "main",
         "onepush",
         "onepush.providers.bark",

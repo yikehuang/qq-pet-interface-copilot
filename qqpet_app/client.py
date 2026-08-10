@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import encodings.idna  # Register the codec explicitly in frozen Windows builds.
 import json
 import re
 import time
@@ -49,6 +51,13 @@ class QQFriend:
     nickname: str = ""
     remark: str = ""
     category_id: int = 0
+
+
+@dataclass(frozen=True)
+class OwnPetProfile:
+    user_id: str
+    pet_id: str
+    pet_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -316,6 +325,7 @@ Transport = Callable[[str, str], dict]
 
 
 class NapCatClient:
+    OWN_PROFILE = ("OidbSvcTrpcTcp.0x99f2_1", 39410, 1)
     DISPLAY = ("OidbSvcTrpcTcp.0x96f2_1", 38642, 1)
     FEED = ("OidbSvcTrpcTcp.0x992d_1", 39213, 1)
     FEED_TIMES = ("OidbSvcTrpcTcp.0x9949_1", 39241, 1)
@@ -326,6 +336,9 @@ class NapCatClient:
     BUY_BATH_ITEM = ("OidbSvcTrpcTcp.0x9bd0_0", 39888, 0)
     REPORT_EVENT = ("OidbSvcTrpcTcp.0x96a6_1", 38566, 1)
     PAGE_RULES = ("OidbSvcTrpcTcp.0x96a4_1", 38564, 1)
+    FRIEND_PROFILE = ("OidbSvcTrpcTcp.0x976c_0", 38764, 0)
+    FRIEND_POKE = ("OidbSvcTrpcTcp.0x985b_0", 39003, 0)
+    FRIEND_VISIT_PATH = (1000, 100, 101)
     STORY_STATUS = ("OidbSvcTrpcTcp.0x975a_1", 38746, 1)
     STORY_SETTLE = ("OidbSvcTrpcTcp.0x9760_1", 38752, 1)
     SCHOOL_OVERVIEW = ("OidbSvcTrpcTcp.0x9b60_1", 39776, 1)
@@ -418,6 +431,31 @@ class NapCatClient:
         if not uin.isdigit():
             raise QQPetError("NapCat 已连接，但尚未取得有效 QQ 登录会话")
         return uin
+
+    def query_own_pet_profile(self, expected_uin: str = "") -> OwnPetProfile:
+        """Read the logged-in account's pet identity without a pre-known petId."""
+        response = self.send_oidb(*self.OWN_PROFILE, b"").body
+        profile_raw = first_bytes(parse_message(response), 1)
+        if not profile_raw:
+            raise QQPetError("服务器未返回本人宠物资料，账号可能尚未开通 QQ 宠物")
+        profile = parse_message(profile_raw)
+        user_id = first_string(profile, 5).strip()
+        pet_id = first_string(profile, 8).strip()
+        pet_name = first_string(profile, 1).strip()
+        if not user_id or not pet_id:
+            raise QQPetError("服务器返回的本人宠物资料缺少 QQ 号或宠物 ID")
+        if expected_uin and user_id != str(expected_uin):
+            raise QQPetError(
+                f"服务器宠物资料属于 QQ {user_id}，与当前登录 QQ {expected_uin} 不一致"
+            )
+        try:
+            padding = "=" * (-len(pet_id) % 4)
+            decoded = base64.b64decode(pet_id + padding, validate=True).decode("ascii")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise QQPetError("服务器返回的宠物 ID 格式无效") from exc
+        if not decoded.startswith(f"{user_id}-"):
+            raise QQPetError("服务器返回的宠物 ID 与 QQ 号不匹配")
+        return OwnPetProfile(user_id=user_id, pet_id=pet_id, pet_name=pet_name)
 
     def query_pk_friend_candidates(
         self, source: int = 6, max_pages: int = 20
@@ -671,9 +709,25 @@ class NapCatClient:
             body += field_bytes(5, business_ext)
         return self.send_oidb(*self.REPORT_EVENT, body)
 
-    def query_page_rules(self, page: int = 6000) -> PageRules:
+    def query_page_rules(
+        self,
+        page: int = 6000,
+        *,
+        pet_id: str = "",
+        execute_ext_info: bytes = b"",
+        request_from: int | None = None,
+        platform: int | None = None,
+    ) -> PageRules:
         # si5.m: trace(1), petId(2), page(3), executeExtInfo(4), from(10), platform(99)
-        body = field_string(2, self.pet_id) + field_varint(3, page) + field_bytes(4, b"")
+        body = (
+            field_string(2, pet_id or self.pet_id)
+            + field_varint(3, page)
+            + field_bytes(4, execute_ext_info)
+        )
+        if request_from is not None:
+            body += field_varint(10, request_from)
+        if platform is not None:
+            body += field_varint(99, platform)
         response = self.send_oidb(*self.PAGE_RULES, body).body
         root = parse_message(response)
         trace = first_string(root, 1)
@@ -703,6 +757,50 @@ class NapCatClient:
                 )
             )
         return PageRules(trace=trace, paths=tuple(paths), declared_count=declared_count)
+
+    def query_friend_visit_rules(
+        self, friend_pet_id: str, execute_ext_info: bytes = b""
+    ) -> PageRules:
+        """Read the friend-home rules using the real Android request shape.
+
+        A Windows/NapCat session currently returns count=0 even when the full
+        Android payload is replayed. Callers must treat that as unsupported,
+        not as a completed visit.
+        """
+        return self.query_page_rules(
+            self.FRIEND_VISIT_PATH[0],
+            pet_id=friend_pet_id,
+            execute_ext_info=execute_ext_info,
+            request_from=0,
+            platform=0,
+        )
+
+    def report_friend_visit(
+        self,
+        friend_uin: str,
+        friend_pet_id: str,
+        execute_ext_info: bytes = b"",
+    ) -> OidbResponse:
+        page, event_type, sub_event = self.FRIEND_VISIT_PATH
+        path = (
+            field_varint(1, page)
+            + field_varint(2, event_type)
+            + field_varint(3, sub_event)
+        )
+        body = (
+            field_string(1, friend_pet_id)
+            + field_string(2, str(friend_uin))
+            + field_bytes(3, path)
+            + field_bytes(4, execute_ext_info)
+        )
+        return self.send_oidb(*self.REPORT_EVENT, body)
+
+    def poke_friend(self, friend_uin: str) -> OidbResponse:
+        try:
+            numeric_uin = int(str(friend_uin))
+        except ValueError as exc:
+            raise QQPetError(f"好友 QQ 号无效：{friend_uin}") from exc
+        return self.send_oidb(*self.FRIEND_POKE, field_varint(1, numeric_uin))
 
     def wash(self, target_clean: int = 100) -> OidbResponse:
         return self.report_event(5000, 500, 501, field_varint(5, target_clean))

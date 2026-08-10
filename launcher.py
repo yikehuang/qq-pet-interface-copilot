@@ -155,10 +155,14 @@ class Launcher(tk.Tk):
                 if session is None:
                     raise RuntimeError("等待 QQ/NapCat 登录超时，请完成登录后再点一次")
             self.events.put(("log", f"已连接 QQ {session.uin}（令牌仅保存在本机）。"))
-            if not pet_id:
-                self.events.put(("need_pet_id", session))
-                return
             client = NapCatClient(session.endpoint.url, session.endpoint.token, pet_id, timeout=8)
+            if not pet_id or preferred_uin != session.uin:
+                self.events.put(("log", "正在从 QQ 宠物服务器一键读取宠物 ID……"))
+                profile = client.query_own_pet_profile(session.uin)
+                pet_id = profile.pet_id
+                client.pet_id = pet_id
+                pet_label = f"“{profile.pet_name}”" if profile.pet_name else ""
+                self.events.put(("log", f"已读取宠物{pet_label}，宠物 ID 已自动保存。"))
             values = client.query_values()
             config = self.store.data
             config["napcat"]["url"] = session.endpoint.url

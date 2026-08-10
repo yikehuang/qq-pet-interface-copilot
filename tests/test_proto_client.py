@@ -88,6 +88,39 @@ class ProtoAndClientTests(unittest.TestCase):
         self.assertEqual(client.check_connection(), "123456")
         self.assertEqual(calls, [("get_login_info", None)])
 
+    def test_own_pet_profile_is_discovered_without_existing_pet_id(self) -> None:
+        pet_id = "MjM2MDA5MTY3OS0wLTItMTc4NTU5Mzc4MDIwNw"
+
+        def transport(command: str, data: str) -> dict:
+            self.assertEqual(command, "OidbSvcTrpcTcp.0x99f2_1")
+            outer = parse_message(bytes.fromhex(data))
+            self.assertEqual(first_bytes(outer, 4), b"")
+            profile = (
+                field_string(1, "小企鹅")
+                + field_string(5, "2360091679")
+                + field_string(8, pet_id)
+            )
+            return oidb_response(39410, 1, field_bytes(1, profile))
+
+        client = NapCatClient("http://unused", "token", "", transport=transport)
+        profile = client.query_own_pet_profile("2360091679")
+        self.assertEqual(profile.user_id, "2360091679")
+        self.assertEqual(profile.pet_id, pet_id)
+        self.assertEqual(profile.pet_name, "小企鹅")
+
+    def test_own_pet_profile_rejects_mismatched_login(self) -> None:
+        profile = field_string(5, "10001") + field_string(8, "MTAwMDEtMC0yLTEyMw")
+        client = NapCatClient(
+            "http://unused",
+            "token",
+            "",
+            transport=lambda _command, _data: oidb_response(
+                39410, 1, field_bytes(1, profile)
+            ),
+        )
+        with self.assertRaisesRegex(QQPetError, "与当前登录 QQ 20002 不一致"):
+            client.query_own_pet_profile("20002")
+
     def test_pk_friend_candidates_decode_real_friend_pet_fields(self) -> None:
         profile = field_string(1, "宠物甲") + field_string(8, "pet-10001")
         user = field_varint(1, 10001) + field_string(2, "好友甲")
@@ -198,6 +231,61 @@ class ProtoAndClientTests(unittest.TestCase):
         self.assertEqual(len(friends), 1)
         self.assertEqual(friends[0].user_id, "12345")
         self.assertEqual(friends[0].remark, "备注")
+
+    def test_friend_visit_packets_match_captured_android_protocol(self) -> None:
+        calls = 0
+
+        def transport(command: str, data: str) -> dict:
+            nonlocal calls
+            calls += 1
+            outer = parse_message(bytes.fromhex(data))
+            request = parse_message(first_bytes(outer, 4))
+            if calls == 1:
+                self.assertEqual(command, "OidbSvcTrpcTcp.0x96a4_1")
+                self.assertEqual(first_string(request, 2), "friend-pet")
+                self.assertEqual(first_varint(request, 3), 1000)
+                self.assertEqual(first_bytes(request, 4), b"ext")
+                self.assertEqual(first_varint(request, 10), 0)
+                self.assertEqual(first_varint(request, 99), 0)
+                rules = field_string(1, '{"count":1}')
+                path = field_varint(1, 1000) + field_varint(2, 100) + field_varint(3, 101)
+                rules += field_bytes(2, field_bytes(1, path))
+                return oidb_response(38564, 1, rules)
+            if calls == 2:
+                self.assertEqual(command, "OidbSvcTrpcTcp.0x96a6_1")
+                self.assertEqual(first_string(request, 1), "friend-pet")
+                self.assertEqual(first_string(request, 2), "10001")
+                path = parse_message(first_bytes(request, 3))
+                self.assertEqual(
+                    (
+                        first_varint(path, 1),
+                        first_varint(path, 2),
+                        first_varint(path, 3),
+                    ),
+                    (1000, 100, 101),
+                )
+                self.assertEqual(first_bytes(request, 4), b"ext")
+                return oidb_response(38566, 1, b"visit-ack")
+            self.assertEqual(command, "OidbSvcTrpcTcp.0x985b_0")
+            self.assertEqual(first_varint(request, 1), 10001)
+            return oidb_response(39003, 0, b"poke-ack")
+
+        client = NapCatClient("http://unused", "token", "self-pet", transport=transport)
+        rules = client.query_friend_visit_rules("friend-pet", b"ext")
+        self.assertTrue(rules.allows((1000, 100, 101)))
+        self.assertEqual(client.report_friend_visit("10001", "friend-pet", b"ext").body, b"visit-ack")
+        self.assertEqual(client.poke_friend("10001").body, b"poke-ack")
+
+    def test_friend_visit_count_zero_is_not_treated_as_supported(self) -> None:
+        body = field_string(1, '{"pkey":"0-65-0-0-0","count":0}')
+
+        def transport(_command: str, _data: str) -> dict:
+            return oidb_response(38564, 1, body)
+
+        client = NapCatClient("http://unused", "token", "self-pet", transport=transport)
+        rules = client.query_friend_visit_rules("friend-pet")
+        self.assertEqual(rules.declared_count, 0)
+        self.assertFalse(rules.allows((1000, 100, 101)))
 
     def test_wire_roundtrip(self) -> None:
         raw = field_varint(1, 12345) + field_bytes(2, b"abc")

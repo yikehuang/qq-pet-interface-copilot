@@ -160,8 +160,8 @@ class MainWindow(tk.Tk):
         screen_height = self.winfo_screenheight()
         available_width = max(640, screen_width - 80)
         available_height = max(520, screen_height - 100)
-        self.geometry(f"{min(1280, available_width)}x{min(820, available_height)}")
-        self.minsize(min(920, available_width), min(620, available_height))
+        self.geometry(f"{min(1440, available_width)}x{min(900, available_height)}")
+        self.minsize(min(980, available_width), min(640, available_height))
         self.config_store = ConfigStore(CONFIG_PATH)
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.scheduler: Scheduler | None = None
@@ -217,6 +217,42 @@ class MainWindow(tk.Tk):
 
     def _build_ui(self) -> None:
         style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        self.configure(background="#f5f3fb")
+        style.configure("TFrame", background="#f5f3fb")
+        style.configure("TLabel", background="#f5f3fb", foreground="#403852")
+        style.configure("TNotebook", background="#f5f3fb", borderwidth=0)
+        style.configure(
+            "TNotebook.Tab",
+            background="#ebe7f4",
+            foreground="#655d73",
+            padding=(18, 9),
+            font=("Microsoft YaHei UI", 10),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", "#ffffff")],
+            foreground=[("selected", "#5d49cb")],
+        )
+        style.configure(
+            "Primary.TButton",
+            background="#6c56dd",
+            foreground="#ffffff",
+            padding=(12, 8),
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        style.map("Primary.TButton", background=[("active", "#5b45c8")])
+        style.configure("Card.TFrame", background="#ffffff", relief="flat")
+        style.configure("Card.TLabel", background="#ffffff", foreground="#817991")
+        style.configure(
+            "CardValue.TLabel",
+            background="#ffffff",
+            foreground="#393149",
+            font=("Microsoft YaHei UI", 15, "bold"),
+        )
         style.configure("Value.TLabel", font=("Microsoft YaHei UI", 20, "bold"))
         style.configure("Title.TLabel", font=("Microsoft YaHei UI", 14, "bold"))
         style.configure(
@@ -226,8 +262,70 @@ class MainWindow(tk.Tk):
             padding=(12, 9),
         )
 
+        hero = tk.Frame(
+            self,
+            background="#ffffff",
+            highlightbackground="#e8e3f1",
+            highlightthickness=1,
+            padx=18,
+            pady=12,
+        )
+        hero.pack(fill=tk.X, padx=12, pady=(12, 0))
+        avatar = tk.Label(
+            hero,
+            text="宠",
+            width=3,
+            height=1,
+            background="#7059df",
+            foreground="#ffffff",
+            font=("Microsoft YaHei UI", 20, "bold"),
+        )
+        avatar.pack(side=tk.LEFT, padx=(0, 13))
+        hero_copy = tk.Frame(hero, background="#ffffff")
+        hero_copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            hero_copy,
+            text="ONEBOT · QQ PET",
+            background="#ffffff",
+            foreground="#887da6",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            hero_copy,
+            text="QQ 宠物接口助手",
+            background="#ffffff",
+            foreground="#302b48",
+            font=("Microsoft YaHei UI", 18, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            hero_copy,
+            text="纯电脑接口托管 · 学习 / 打工 / 冒险 / PK / 好友照顾",
+            background="#ffffff",
+            foreground="#817991",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(anchor="w", pady=(2, 0))
+        hero_status = tk.Frame(hero, background="#ffffff")
+        hero_status.pack(side=tk.RIGHT, padx=(12, 0))
+        self.hero_connection_label = tk.Label(
+            hero_status,
+            textvariable=self.status_vars["connection"],
+            background="#fff0d7",
+            foreground="#9b6109",
+            padx=12,
+            pady=5,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self.hero_connection_label.pack(anchor="e")
+        tk.Label(
+            hero_status,
+            textvariable=self.status_vars["story"],
+            background="#ffffff",
+            foreground="#817991",
+            font=("Microsoft YaHei UI", 8),
+        ).pack(anchor="e", pady=(6, 0))
+
         shell = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
-        shell.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        shell.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
         left_panel = ttk.Frame(shell)
         left_canvas = tk.Canvas(
             left_panel,
@@ -258,7 +356,14 @@ class MainWindow(tk.Tk):
         shell.add(left_panel, weight=1)
         shell.add(right, weight=3)
 
-        ttk.Label(left, text="宠物实时状态", style="Title.TLabel").pack(anchor="w", pady=(0, 14))
+        ttk.Label(left, text="宠物实时状态", style="Title.TLabel").pack(anchor="w", pady=(0, 10))
+        metrics = ttk.Frame(left)
+        metrics.pack(fill=tk.X, pady=(0, 10))
+        metrics.columnconfigure((0, 1), weight=1)
+        self._metric_card(metrics, "金币", "gold", 0, 0, "#a36e00")
+        self._metric_card(metrics, "心情", "mood", 0, 1, "#c85178")
+        self._metric_card(metrics, "体力", "hunger", 1, 0, "#27834d")
+        self._metric_card(metrics, "清洁", "clean", 1, 1, "#287aa7")
         self._status_row(left, "接口", "connection")
         self._status_row(left, "金币", "gold")
         self._status_row(left, "食物", "food")
@@ -274,7 +379,9 @@ class MainWindow(tk.Tk):
 
         buttons = ttk.Frame(left)
         buttons.pack(fill=tk.X, pady=(22, 0))
-        self.start_button = ttk.Button(buttons, text="开始自动调度", command=self._start)
+        self.start_button = ttk.Button(
+            buttons, text="启动自动托管", command=self._start, style="Primary.TButton"
+        )
         self.start_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 5))
         self.stop_button = ttk.Button(buttons, text="停止", command=self._stop, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(5, 0))
@@ -429,6 +536,22 @@ class MainWindow(tk.Tk):
             self.setting_vars[path] = (variable, value_type)
             section_rows[key] += 1
 
+        connection_section = section_frames["connection"]
+        pet_lookup_row = section_rows["connection"]
+        self.pet_id_lookup_button = ttk.Button(
+            connection_section,
+            text="从服务器一键读取并保存宠物 ID",
+            command=self._lookup_own_pet_id,
+        )
+        self.pet_id_lookup_button.grid(
+            row=pet_lookup_row,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=6,
+            pady=(12, 6),
+        )
+
         external_test_row = section_rows["notifications"]
         self.external_notification_test_button = ttk.Button(
             external_section,
@@ -528,6 +651,39 @@ class MainWindow(tk.Tk):
         ttk.Button(form, text="保存全部设置并立即生效", command=self._save_settings).pack(
             fill=tk.X, padx=6, pady=(10, 18)
         )
+
+    def _metric_card(
+        self,
+        parent: ttk.Frame,
+        title: str,
+        key: str,
+        row: int,
+        column: int,
+        accent: str,
+    ) -> None:
+        card = tk.Frame(
+            parent,
+            background="#ffffff",
+            highlightbackground="#e9e5f1",
+            highlightthickness=1,
+            padx=11,
+            pady=8,
+        )
+        card.grid(row=row, column=column, sticky="nsew", padx=4, pady=4)
+        tk.Label(
+            card,
+            text=title,
+            background="#ffffff",
+            foreground="#837b95",
+            font=("Microsoft YaHei UI", 8),
+        ).pack(anchor="w")
+        tk.Label(
+            card,
+            textvariable=self.status_vars[key],
+            background="#ffffff",
+            foreground=accent,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        ).pack(anchor="w", pady=(2, 0))
 
     @staticmethod
     def _settings_section_title(key: str) -> str:
@@ -979,6 +1135,33 @@ class MainWindow(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _lookup_own_pet_id(self) -> None:
+        self.pet_id_lookup_button.configure(state=tk.DISABLED)
+        self._show_notice(
+            "正在读取宠物 ID",
+            "正在通过当前电脑版 QQ 会话查询服务器本人宠物资料…",
+            "info",
+        )
+
+        def worker() -> None:
+            try:
+                url = str(self.setting_vars["napcat.url"][0].get()).strip()
+                token = str(self.setting_vars["napcat.token"][0].get()).strip()
+                timeout = float(self.setting_vars["napcat.timeout_seconds"][0].get())
+                expected_uin = str(self.setting_vars["account.uin"][0].get()).strip()
+                client = NapCatClient(url, token, "", timeout)
+                logged_in_uin = client.check_connection()
+                if expected_uin and expected_uin != logged_in_uin:
+                    raise RuntimeError(
+                        f"设置中的 QQ {expected_uin} 与当前登录 QQ {logged_in_uin} 不一致"
+                    )
+                profile = client.query_own_pet_profile(logged_in_uin)
+                self.events.put(("own_pet_profile", profile))
+            except Exception as exc:
+                self.events.put(("own_pet_profile_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _refresh_work_jobs(self) -> None:
         self.job_refresh_button.configure(state=tk.DISABLED)
         self.job_status_label.configure(text="正在读取服务器职业和岗位目录…")
@@ -1389,13 +1572,52 @@ class MainWindow(tk.Tk):
                     str(visit_config.get("whitelist", "")),
                     str(visit_config.get("exclude", "")),
                 )
+                verified_pets = {
+                    opponent.user_id: opponent
+                    for opponent in load_latest_friend_pet_capture(FRIEND_VISIT_DIR)
+                }
+                candidates = tuple(
+                    friend
+                    for friend in candidates
+                    if str(friend.user_id) in verified_pets
+                )
                 limit = int(visit_config.get("max_per_day", 0))
                 if limit > 0:
                     candidates = candidates[:limit]
+                protocol_state = "no_candidates"
+                protocol_detail = "没有可用于协议检测的宠物好友"
+                if candidates:
+                    probe = verified_pets[str(candidates[0].user_id)]
+                    try:
+                        rules = client.query_friend_visit_rules(probe.pet_id)
+                        if rules.allows(client.FRIEND_VISIT_PATH):
+                            protocol_state = "rules_available"
+                            protocol_detail = "服务器已下发真实好友访问路径"
+                        elif rules.declared_count == 0:
+                            protocol_state = "windows_unsupported"
+                            protocol_detail = (
+                                "Windows/NapCat 会话返回好友页面规则 count=0"
+                            )
+                        else:
+                            protocol_state = "path_missing"
+                            protocol_detail = "服务器响应中没有访问路径 1000/100/101"
+                    except Exception as exc:
+                        protocol_state = "probe_failed"
+                        protocol_detail = f"好友协议检测失败：{exc}"
                 progress = FriendVisitProgress(FRIEND_VISIT_DIR)
                 progress.record_scan(len(friends), len(candidates))
                 self.events.put(
-                    ("friend_visit_scan", (len(friends), len(candidates), progress.summary()))
+                    (
+                        "friend_visit_scan",
+                        (
+                            len(friends),
+                            len(candidates),
+                            len(verified_pets),
+                            progress.summary(),
+                            protocol_state,
+                            protocol_detail,
+                        ),
+                    )
                 )
             except Exception as exc:
                 self.events.put(("friend_visit_error", str(exc)))
@@ -1442,9 +1664,33 @@ class MainWindow(tk.Tk):
                     self.external_notification_test_button.configure(state=tk.NORMAL)
                 elif kind == "external_notification_test_error":
                     self.external_notification_test_button.configure(state=tk.NORMAL)
+                elif kind == "own_pet_profile":
+                    profile = payload
+                    self.setting_vars["account.uin"][0].set(profile.user_id)
+                    self.setting_vars["account.pet_id"][0].set(profile.pet_id)
+                    config = self.config_store.data
+                    config["account"]["uin"] = profile.user_id
+                    config["account"]["pet_id"] = profile.pet_id
+                    self.config_store.save(config)
+                    self.pet_id_lookup_button.configure(state=tk.NORMAL)
+                    pet_label = f"“{profile.pet_name}”" if profile.pet_name else "当前宠物"
+                    self._show_notice(
+                        "宠物 ID 已保存",
+                        f"已从服务器读取{pet_label}，以后可直接在电脑上运行。",
+                        "success",
+                    )
+                    self._append_log(
+                        f"[{datetime.now():%H:%M:%S}] 已从服务器读取并保存 QQ "
+                        f"{profile.user_id} 的宠物 ID"
+                    )
+                elif kind == "own_pet_profile_error":
+                    self.pet_id_lookup_button.configure(state=tk.NORMAL)
                 elif kind == "status":
                     values, story, state = payload
                     self.status_vars["connection"].set("已连接")
+                    self.hero_connection_label.configure(
+                        background="#e1f7ee", foreground="#187d53"
+                    )
                     self.status_vars["gold"].set(f"{values.gold:.2f}")
                     inventory = state.get("food_inventory", {})
                     self.status_vars["food"].set(
@@ -1492,20 +1738,41 @@ class MainWindow(tk.Tk):
                             f"今日喂食 {care_summary.get('feeds', 0)}"
                         )
                 elif kind == "connection":
-                    self.status_vars["connection"].set(str(payload))
+                    connection_text = str(payload)
+                    self.status_vars["connection"].set(connection_text)
+                    is_connected = connection_text == "已连接"
+                    self.hero_connection_label.configure(
+                        background="#e1f7ee" if is_connected else "#fff0d7",
+                        foreground="#187d53" if is_connected else "#9b6109",
+                    )
                 elif kind == "activity":
                     self.status_vars["story"].set(str(payload))
                 elif kind == "friend_visit_scan":
-                    total, eligible, summary = payload
+                    (
+                        total,
+                        eligible,
+                        verified_pet_count,
+                        summary,
+                        protocol_state,
+                        protocol_detail,
+                    ) = payload
                     self.status_vars["friend_visits"].set(
                         f"成功{summary['success']} 无宠物{summary['no_pet']} "
                         f"已访问{summary['already_visited']} 失败{summary['failed']}"
                     )
-                    self._append_log(
+                    message = (
                         f"[{datetime.now():%H:%M:%S}] 好友列表共 {total} 人，"
-                        f"本轮候选 {eligible} 人；真实访问协议尚待 Hook 样本，"
-                        "未发送访问或踩踩请求"
+                        f"已确认有宠物 {verified_pet_count} 人，本轮候选 {eligible} 人；"
+                        f"{protocol_detail}。"
                     )
+                    if protocol_state == "rules_available":
+                        message += (
+                            "真实协议已识别，但访问记录/奖励的二次验证尚未通过，"
+                            "本轮未计为成功"
+                        )
+                    else:
+                        message += "本轮真实访问 0 人，未发送访问或踩踩写请求"
+                    self._append_log(message)
                     self.friend_visit_button.configure(state=tk.NORMAL)
                 elif kind == "friend_visit_error":
                     self._append_log(

@@ -458,7 +458,9 @@ class Scheduler:
         self.friend_progress.record_scan(len(friends), len(candidates))
         self.log(
             f"每日好友列表已读取：共 {len(friends)} 人，候选 {len(candidates)} 人；"
-            "真实访问协议未确认前不会发送访问或踩踩请求"
+            "真实协议已抓到（访问 0x96a4/0x96a6、踩踩 0x985b），"
+            "但 Windows/NapCat 会话不下发好友页面规则；"
+            "在访问记录或奖励可二次验证前不会计为成功"
         )
 
     def _run_friend_care_if_due(
