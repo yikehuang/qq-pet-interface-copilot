@@ -5,20 +5,22 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
 
-NAPCAT_DESKTOP_RELEASE_API = (
-    "https://api.github.com/repos/NapNeko/NapCatQQ-Desktop/releases/latest"
-)
+NAPCAT_RELEASE_API = "https://api.github.com/repos/NapNeko/NapCatQQ/releases/latest"
+NAPCAT_RUNTIME_ASSET = "NapCat.Shell.Windows.Node.zip"
 NAPCAT_CONFIG_RELATIVE = Path("runtime") / "NapCatQQ" / "config"
+NAPCAT_DIRECT_CONFIG_RELATIVE = Path("napcat") / "config"
 DEFAULT_ONEBOT_PORT = 6201
 
 
@@ -44,6 +46,14 @@ class DependencyState:
     sessions: tuple[LoginSession, ...]
 
 
+@dataclass(frozen=True)
+class RuntimeAsset:
+    url: str
+    name: str
+    version: str
+    sha256: str
+
+
 def _is_loopback(host: str) -> bool:
     return host.lower() in {"127.0.0.1", "localhost", "::1"}
 
@@ -57,6 +67,10 @@ def napcat_roots() -> tuple[Path, ...]:
     if local_app_data:
         candidates.extend(
             (
+                Path(local_app_data)
+                / "QQPetInterfaceCopilot"
+                / "runtime"
+                / "NapCat.Shell.Windows.Node",
                 Path(local_app_data) / "NapCatQQ Desktop",
                 Path(local_app_data) / "Programs" / "NapCatQQ Desktop",
             )
@@ -68,9 +82,34 @@ def napcat_roots() -> tuple[Path, ...]:
     return tuple(unique)
 
 
+def managed_runtime_root() -> Path:
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        base = str(Path.home() / "AppData" / "Local")
+    return Path(base) / "QQPetInterfaceCopilot" / "runtime" / "NapCat.Shell.Windows.Node"
+
+
+def napcat_config_dir(root: Path) -> Path | None:
+    direct = root / NAPCAT_DIRECT_CONFIG_RELATIVE
+    if direct.is_dir() and (root / "node.exe").is_file() and (root / "index.js").is_file():
+        return direct
+    desktop = root / NAPCAT_CONFIG_RELATIVE
+    if desktop.is_dir():
+        return desktop
+    return None
+
+
+def is_managed_runtime(root: Path) -> bool:
+    return (
+        (root / "node.exe").is_file()
+        and (root / "index.js").is_file()
+        and (root / NAPCAT_DIRECT_CONFIG_RELATIVE).is_dir()
+    )
+
+
 def find_napcat_root() -> Path | None:
     for root in napcat_roots():
-        if (root / NAPCAT_CONFIG_RELATIVE).is_dir():
+        if napcat_config_dir(root) is not None:
             return root
     return None
 
@@ -120,8 +159,8 @@ def discover_endpoints(
     if configured_url.startswith(("http://127.0.0.1", "http://localhost")):
         candidates.append(OneBotEndpoint(configured_url.rstrip("/"), configured_token))
     for root in napcat_roots():
-        config_dir = root / NAPCAT_CONFIG_RELATIVE
-        if not config_dir.is_dir():
+        config_dir = napcat_config_dir(root)
+        if config_dir is None:
             continue
         for path in sorted(config_dir.glob("onebot11_*.json")):
             candidates.extend(endpoints_from_config(path))
@@ -294,7 +333,13 @@ def _free_local_port(preferred: int = DEFAULT_ONEBOT_PORT) -> int:
 def start_napcat(uin: str = "", qq_path: Path | None = None) -> subprocess.Popen:
     root = find_napcat_root()
     if not root:
-        raise RuntimeError("尚未安装 NapCatQQ Desktop")
+        raise RuntimeError("尚未安装 NapCat 运行环境")
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    if is_managed_runtime(root):
+        command = [str(root / "node.exe"), str(root / "index.js")]
+        if uin.isdigit():
+            command.extend(("-q", uin))
+        return subprocess.Popen(command, cwd=root, creationflags=creationflags)
     runtime = root / "runtime" / "NapCatQQ"
     boot = runtime / "NapCatWinBootMain.exe"
     hook = runtime / "NapCatWinBootHook.dll"
@@ -306,61 +351,135 @@ def start_napcat(uin: str = "", qq_path: Path | None = None) -> subprocess.Popen
     command = [str(boot), str(qq), str(hook)]
     if uin.isdigit():
         command.append(uin)
-    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     return subprocess.Popen(command, cwd=runtime, creationflags=creationflags)
 
 
-def latest_desktop_installer() -> tuple[str, str, str]:
+def latest_napcat_runtime() -> RuntimeAsset:
     request = urllib.request.Request(
-        NAPCAT_DESKTOP_RELEASE_API,
+        NAPCAT_RELEASE_API,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "QQPetInterfaceCopilot"},
     )
     with urllib.request.urlopen(request, timeout=20) as response:
         release = json.loads(response.read().decode("utf-8"))
     assets = release.get("assets") or []
-    msi = next(
+    asset = next(
         (
             asset
             for asset in assets
-            if str(asset.get("name", "")).lower() == "napcatqq-desktop-x64.msi"
+            if str(asset.get("name", "")).lower() == NAPCAT_RUNTIME_ASSET.lower()
         ),
         None,
     )
-    sums = next((asset for asset in assets if asset.get("name") == "SHA256SUMS"), None)
-    if not msi or not sums:
-        raise RuntimeError("官方发布中没有找到 Windows x64 安装包或校验文件")
-    return str(msi["browser_download_url"]), str(sums["browser_download_url"]), str(msi["name"])
+    if not asset:
+        raise RuntimeError("NapCat 官方发布中没有找到完整 Windows 运行包")
+    digest = str(asset.get("digest") or "")
+    if not digest.lower().startswith("sha256:"):
+        raise RuntimeError("NapCat 官方运行包没有提供 SHA-256，已停止下载")
+    sha256 = digest.split(":", 1)[1].strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        raise RuntimeError("NapCat 官方运行包的 SHA-256 格式无效")
+    return RuntimeAsset(
+        url=str(asset["browser_download_url"]),
+        name=str(asset["name"]),
+        version=str(release.get("tag_name") or "unknown"),
+        sha256=sha256,
+    )
 
 
-def download_desktop_installer(target_dir: Path, progress: Callable[[str], None] | None = None) -> Path:
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().lower()
+
+
+def download_napcat_runtime(
+    target_dir: Path,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[Path, RuntimeAsset]:
     notify = progress or (lambda _message: None)
     target_dir.mkdir(parents=True, exist_ok=True)
-    msi_url, sums_url, name = latest_desktop_installer()
-    target = target_dir / name
-    notify("正在从 NapCat 官方 GitHub 下载 Windows 安装包……")
-    urllib.request.urlretrieve(msi_url, target)
-    with urllib.request.urlopen(sums_url, timeout=20) as response:
-        sums_text = response.read().decode("utf-8", errors="replace")
-    expected = ""
-    for line in sums_text.splitlines():
-        if name.lower() in line.lower():
-            expected = line.split()[0].lower()
-            break
-    actual = hashlib.sha256(target.read_bytes()).hexdigest().lower()
-    if not expected or not secrets.compare_digest(actual, expected):
+    asset = latest_napcat_runtime()
+    target = target_dir / asset.name
+    notify(f"正在下载 NapCat 完整运行环境 {asset.version}（约 120 MB）……")
+    urllib.request.urlretrieve(asset.url, target)
+    actual = _file_sha256(target)
+    if not secrets.compare_digest(actual, asset.sha256):
         target.unlink(missing_ok=True)
-        raise RuntimeError("NapCat 安装包校验失败，已删除下载文件")
-    notify("官方安装包校验通过。")
-    return target
+        raise RuntimeError("NapCat 运行包校验失败，已删除下载文件")
+    notify("NapCat 官方 SHA-256 校验通过。")
+    return target, asset
 
 
-def install_desktop(msi_path: Path) -> subprocess.Popen:
+def _safe_extract_zip(archive_path: Path, destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    destination_root = destination.resolve()
+    with zipfile.ZipFile(archive_path) as archive:
+        for info in archive.infolist():
+            target = (destination / info.filename).resolve()
+            try:
+                target.relative_to(destination_root)
+            except ValueError as exc:
+                raise RuntimeError("NapCat 压缩包包含不安全路径，已停止安装") from exc
+        archive.extractall(destination)
+
+
+def install_napcat_runtime(
+    archive_path: Path,
+    asset: RuntimeAsset,
+    install_root: Path | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> Path:
     if os.name != "nt":
         raise RuntimeError("一键安装目前仅支持 Windows")
-    return subprocess.Popen(
-        ["msiexec.exe", "/i", str(msi_path), "/passive", "/norestart"],
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+    notify = progress or (lambda _message: None)
+    root = install_root or managed_runtime_root()
+    if is_managed_runtime(root):
+        notify("NapCat 完整运行环境已经安装，无需重复安装。")
+        return root
+    staging = root.with_name(root.name + ".installing")
+    if staging.exists():
+        shutil.rmtree(staging)
+    notify("正在解压并配置 NapCat、Node 和 QQ 运行组件……")
+    _safe_extract_zip(archive_path, staging)
+    required = (
+        staging / "node.exe",
+        staging / "index.js",
+        staging / "wrapper.node",
+        staging / "napcat" / "napcat.mjs",
+        staging / "napcat" / "config",
     )
+    if not all(path.exists() for path in required):
+        shutil.rmtree(staging, ignore_errors=True)
+        raise RuntimeError("NapCat 完整运行包缺少启动文件，已停止安装")
+    metadata = {
+        "source": "NapNeko/NapCatQQ",
+        "asset": asset.name,
+        "version": asset.version,
+        "sha256": asset.sha256,
+    }
+    (staging / ".qqpet-runtime.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    root.parent.mkdir(parents=True, exist_ok=True)
+    if root.exists():
+        backup = root.with_name(root.name + f".incomplete-{int(time.time())}")
+        root.replace(backup)
+    staging.replace(root)
+    notify("NapCat 完整运行环境安装完成；无需打开 NapCatQQ Desktop。")
+    return root
+
+
+def ensure_napcat_runtime(
+    target_dir: Path,
+    progress: Callable[[str], None] | None = None,
+) -> Path:
+    current = find_napcat_root()
+    if current:
+        return current
+    archive, asset = download_napcat_runtime(target_dir, progress)
+    return install_napcat_runtime(archive, asset, progress=progress)
 
 
 def wait_for_session(
@@ -369,10 +488,13 @@ def wait_for_session(
     preferred_uin: str = "",
     timeout: float = 120,
     interval: float = 2,
+    on_wait: Callable[[], None] | None = None,
 ) -> LoginSession | None:
     deadline = time.monotonic() + timeout
     configured_for: set[Path] = set()
     while time.monotonic() < deadline:
+        if on_wait:
+            on_wait()
         sessions = active_sessions(configured_url, configured_token)
         if preferred_uin:
             match = next((item for item in sessions if item.uin == preferred_uin), None)
@@ -385,7 +507,10 @@ def wait_for_session(
         # this file automatically. Existing enabled servers are never replaced.
         root = find_napcat_root()
         if root:
-            config_dir = root / NAPCAT_CONFIG_RELATIVE
+            config_dir = napcat_config_dir(root)
+            if config_dir is None:
+                time.sleep(interval)
+                continue
             paths = sorted(
                 config_dir.glob("onebot11_*.json"),
                 key=lambda item: item.stat().st_mtime_ns,
@@ -404,9 +529,20 @@ def wait_for_session(
     return None
 
 
+def login_qrcode_path(root: Path | None = None) -> Path | None:
+    selected = root or find_napcat_root()
+    if not selected or not is_managed_runtime(selected):
+        return None
+    path = selected / "napcat" / "cache" / "qrcode.png"
+    return path if path.is_file() else None
+
+
 def ensure_onebot_for_uin(uin: str) -> OneBotEndpoint:
     root = find_napcat_root()
     if not root:
-        raise RuntimeError("尚未安装 NapCatQQ Desktop")
-    config_path = root / NAPCAT_CONFIG_RELATIVE / f"onebot11_{uin}.json"
+        raise RuntimeError("尚未安装 NapCat 运行环境")
+    config_dir = napcat_config_dir(root)
+    if config_dir is None:
+        raise RuntimeError("NapCat 配置目录不存在，请使用启动器修复运行环境")
+    config_path = config_dir / f"onebot11_{uin}.json"
     return configure_local_onebot(config_path, _free_local_port())

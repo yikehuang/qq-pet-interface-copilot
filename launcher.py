@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import queue
+import os
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
@@ -11,8 +13,8 @@ from tkinter import messagebox, simpledialog, ttk
 from qqpet_app.bootstrap import (
     active_sessions,
     dependency_state,
-    download_desktop_installer,
-    install_desktop,
+    ensure_napcat_runtime,
+    login_qrcode_path,
     start_napcat,
     wait_for_session,
 )
@@ -26,7 +28,11 @@ ROOT = (
     else Path(__file__).resolve().parent
 )
 CONFIG_PATH = ROOT / "config.yaml"
-DOWNLOAD_DIR = ROOT / "downloads"
+DOWNLOAD_DIR = (
+    Path(os.environ.get("LOCALAPPDATA") or ROOT)
+    / "QQPetInterfaceCopilot"
+    / "downloads"
+)
 
 
 def _configured_identity(store: ConfigStore) -> tuple[str, str, str, str]:
@@ -63,7 +69,7 @@ class Launcher(tk.Tk):
         ttk.Label(body, text="QQ 宠物助手", font=("Microsoft YaHei UI", 20, "bold")).pack(anchor="w")
         ttk.Label(
             body,
-            text="自动检查 QQ、NapCat 和本机会话，成功后直接打开控制台。",
+            text="自动安装 NapCat 完整环境、连接 QQ 会话，成功后直接打开控制台。",
             foreground="#666",
         ).pack(anchor="w", pady=(6, 18))
         self.state_var = tk.StringVar(value="准备检查……")
@@ -74,9 +80,9 @@ class Launcher(tk.Tk):
         self.log.pack(fill=tk.BOTH, expand=True)
         actions = ttk.Frame(body)
         actions.pack(fill=tk.X, pady=(14, 0))
-        self.connect_button = ttk.Button(actions, text="一键连接并打开", command=self.connect)
+        self.connect_button = ttk.Button(actions, text="一键安装并打开", command=self.connect)
         self.connect_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        self.install_button = ttk.Button(actions, text="安装 NapCat", command=self.install_napcat)
+        self.install_button = ttk.Button(actions, text="修复运行环境", command=self.install_napcat)
         self.install_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
 
     def _append(self, message: str) -> None:
@@ -106,19 +112,46 @@ class Launcher(tk.Tk):
             self.events.put(("log", "正在检查电脑版 QQ、NapCat 和本机接口……"))
             state = dependency_state(url, token)
             if not state.napcat_root:
-                self.events.put(("missing_napcat", None))
-                return
+                self.events.put(("log", "未发现 NapCat，开始自动安装全部运行组件。"))
+                ensure_napcat_runtime(
+                    DOWNLOAD_DIR, lambda message: self.events.put(("log", message))
+                )
+                self.events.put(
+                    (
+                        "log",
+                        "当前使用 NapCat；SnowLuma 是并列的另一套框架，本助手无需重复安装。",
+                    )
+                )
+                state = dependency_state(url, token)
+                if not state.napcat_root:
+                    raise RuntimeError("NapCat 安装后未通过完整性检查")
             if state.sessions:
                 session = next(
                     (item for item in state.sessions if item.uin == preferred_uin),
                     state.sessions[0],
                 )
             else:
-                if not state.qq_path:
-                    raise RuntimeError("没有找到电脑版 QQ，请先安装并登录 QQ")
-                self.events.put(("log", "NapCat 尚未在线，正在启动 QQ；如出现登录页请扫码确认。"))
+                self.events.put(("log", "NapCat 尚未在线，正在启动登录；如出现二维码请扫码确认。"))
+                login_started = time.time()
                 start_napcat(preferred_uin, state.qq_path)
-                session = wait_for_session(url, token, preferred_uin, timeout=120)
+                qr_shown = False
+
+                def show_qr_when_ready() -> None:
+                    nonlocal qr_shown
+                    if qr_shown:
+                        return
+                    qr_path = login_qrcode_path()
+                    if qr_path and qr_path.stat().st_mtime >= login_started - 2:
+                        qr_shown = True
+                        self.events.put(("show_qr", qr_path))
+
+                session = wait_for_session(
+                    url,
+                    token,
+                    preferred_uin,
+                    timeout=180,
+                    on_wait=show_qr_when_ready,
+                )
                 if session is None:
                     raise RuntimeError("等待 QQ/NapCat 登录超时，请完成登录后再点一次")
             self.events.put(("log", f"已连接 QQ {session.uin}（令牌仅保存在本机）。"))
@@ -140,15 +173,10 @@ class Launcher(tk.Tk):
 
     def _install_worker(self) -> None:
         try:
-            installer = download_desktop_installer(
+            ensure_napcat_runtime(
                 DOWNLOAD_DIR, lambda message: self.events.put(("log", message))
             )
-            self.events.put(("log", "正在启动 NapCat 官方安装程序；如出现系统确认，请选择允许。"))
-            process = install_desktop(installer)
-            code = process.wait()
-            if code not in (0, 1641, 3010):
-                raise RuntimeError(f"NapCat 安装未完成，安装程序返回 {code}")
-            self.events.put(("log", "NapCat 安装完成，正在重新检查……"))
+            self.events.put(("log", "运行环境检查完成，正在连接并打开助手……"))
             self.events.put(("retry", None))
         except Exception as exc:
             self.events.put(("error", str(exc)))
@@ -180,11 +208,6 @@ class Launcher(tk.Tk):
                 if kind == "log":
                     self.state_var.set(str(payload))
                     self._append(str(payload))
-                elif kind == "missing_napcat":
-                    self._finish_busy()
-                    self.state_var.set("尚未安装 NapCat")
-                    if messagebox.askyesno("需要 NapCat", "是否现在从官方 GitHub 下载并安装 NapCat？"):
-                        self.install_napcat()
                 elif kind == "need_pet_id":
                     self._finish_busy()
                     value = simpledialog.askstring(
@@ -194,6 +217,13 @@ class Launcher(tk.Tk):
                     )
                     if value:
                         self._save_pet_id(payload, value)
+                elif kind == "show_qr":
+                    self.state_var.set("请使用手机 QQ 扫描登录二维码")
+                    self._append(f"登录二维码已打开：{payload}")
+                    try:
+                        os.startfile(str(payload))
+                    except OSError as exc:
+                        self._append(f"无法自动打开二维码：{exc}")
                 elif kind == "launch":
                     self.state_var.set("连接成功，正在打开控制台……")
                     self.progress.stop()
