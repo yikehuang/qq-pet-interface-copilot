@@ -19,6 +19,7 @@ from qqpet_app.bootstrap import (
     login_qrcode_path,
     napcat_config_dir,
     probe_login,
+    repair_managed_runtime_dependencies,
     start_napcat,
 )
 from qqpet_app.single_instance import SingleInstance
@@ -121,8 +122,9 @@ class BootstrapTests(unittest.TestCase):
             self.assertFalse((base / "outside.txt").exists())
 
     @mock.patch("qqpet_app.bootstrap.subprocess.Popen")
+    @mock.patch("qqpet_app.bootstrap.repair_managed_runtime_dependencies")
     @mock.patch("qqpet_app.bootstrap.find_napcat_root")
-    def test_managed_runtime_passes_quick_login_flag(self, find_root, popen):
+    def test_managed_runtime_passes_quick_login_flag(self, find_root, repair, popen):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "node.exe").write_bytes(b"node")
@@ -133,6 +135,25 @@ class BootstrapTests(unittest.TestCase):
             command = popen.call_args.args[0]
             self.assertEqual(command[-2:], ["-q", "123456"])
             self.assertEqual(popen.call_args.kwargs["cwd"], root)
+            repair.assert_called_once_with(root, None)
+
+    def test_repairs_managed_runtime_dlls_from_custom_qq_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "napcat"
+            root.mkdir()
+            qq = base / "QQ.exe"
+            qq.write_bytes(b"qq")
+            app = base / "versions" / "9.9.33-test" / "resources" / "app"
+            app.mkdir(parents=True)
+            (app / "crypto.dll").write_bytes(b"crypto")
+            (app / "ssl.dll").write_bytes(b"ssl")
+
+            copied = repair_managed_runtime_dependencies(root, qq)
+
+            self.assertEqual({path.name for path in copied}, {"crypto.dll", "ssl.dll"})
+            self.assertEqual((root / "crypto.dll").read_bytes(), b"crypto")
+            self.assertEqual((root / "ssl.dll").read_bytes(), b"ssl")
 
     @mock.patch("qqpet_app.bootstrap.find_napcat_root")
     def test_qrcode_is_returned_only_after_png_is_complete(self, find_root):
