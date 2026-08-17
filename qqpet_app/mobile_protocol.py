@@ -689,16 +689,24 @@ class MobileProtocolReader:
         waiting_reported = False
 
         while True:
-            # Preserve an explicitly configured device while it is online. This
-            # also keeps manual USB selection above emulator discovery.
+            # A configured serial is an explicit device boundary. If it is offline,
+            # keep waiting for that device instead of silently switching accounts.
             preferred_serial = "" if self.automatic_device else self.adb_serial
             preferred_connect = (
                 (preferred_serial,) if preferred_serial and ":" in preferred_serial else ()
             )
             current_output = self._adb_devices(self.adb_path, preferred_connect)
             preferred = select_adb_serial(current_output, preferred_serial)
-            if preferred_serial and preferred == preferred_serial:
-                return preferred
+            if preferred_serial:
+                if preferred == preferred_serial:
+                    return preferred
+                if time.monotonic() >= deadline:
+                    break
+                if report is not None and not waiting_reported:
+                    report(f"正在等待手动指定的 Android 设备 {preferred_serial} 连接……")
+                    waiting_reported = True
+                time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+                continue
 
             # Every provider is queried independently. Selecting a running instance
             # switches both the serial and the matching ADB executable together. A
@@ -735,6 +743,10 @@ class MobileProtocolReader:
                 waiting_reported = True
             time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
 
+        if preferred_serial:
+            raise MobileProtocolUnavailable(
+                f"手动指定的 Android 设备 {preferred_serial} 未连接或未处于在线状态"
+            )
         raise MobileProtocolUnavailable(
             "等待设备启动超时，未发现运行中的安卓模拟器或已连接的 Android 设备"
         )

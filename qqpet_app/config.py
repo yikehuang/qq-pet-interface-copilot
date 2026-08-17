@@ -193,21 +193,22 @@ def _migrate_loaded(config: dict[str, Any]) -> dict[str, Any]:
         path = str(mobile.get("adb_path") or "").strip()
         serial = str(mobile.get("adb_serial") or "").strip()
         normalized_path = path.replace("/", "\\").casefold()
-        known_emulator_path = any(
-            marker in normalized_path
-            for marker in ("\\mumu", "\\netease\\", "\\leidian\\", "\\ldplayer")
+        mumu_path = any(
+            marker in normalized_path for marker in ("\\mumu", "\\netease\\")
         )
-        known_emulator_serial = (
-            serial.startswith("emulator-")
-            or serial.startswith("127.0.0.1:16")
-            or serial == "127.0.0.1:5555"
+        ldplayer_path = any(
+            marker in normalized_path for marker in ("\\leidian\\", "\\ldplayer")
         )
-        # Older launchers wrote their automatically discovered emulator back into
-        # these fields. Recognize those generated combinations while preserving
-        # USB serials and custom TCP endpoints as deliberate manual overrides.
+        # Older launchers wrote the first/default emulator instance back into
+        # these fields. Only migrate provider-specific default serials: higher
+        # ports and indexes may be a deliberate manual multi-instance selection.
+        generated_default = (
+            (mumu_path and serial == "127.0.0.1:16384")
+            or (ldplayer_path and serial in {"emulator-5554", "127.0.0.1:5555"})
+        )
         mobile["auto_device"] = (
             (not path and serial in {"", "127.0.0.1:16416"})
-            or (known_emulator_path and known_emulator_serial)
+            or generated_default
         )
         if mobile["auto_device"]:
             mobile["adb_path"] = ""

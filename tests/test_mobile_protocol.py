@@ -261,7 +261,10 @@ class MobileProtocolTests(unittest.TestCase):
             adb = Path(temporary) / "adb.exe"
             adb.touch()
             reader = MobileProtocolReader(
-                ".", adb_path=adb, adb_serial="127.0.0.1:16416"
+                ".",
+                adb_path=adb,
+                adb_serial="127.0.0.1:16416",
+                automatic_device=True,
             )
             calls: list[list[str]] = []
 
@@ -286,7 +289,39 @@ class MobileProtocolTests(unittest.TestCase):
             stale_connect = [str(adb), "connect", "127.0.0.1:16416"]
             device_calls = [index for index, call in enumerate(calls) if call == [str(adb), "devices"]]
             self.assertLess(calls.index(discovered_connect), device_calls[-1])
-            self.assertLess(calls.index(stale_connect), device_calls[0])
+            self.assertNotIn(stale_connect, calls)
+
+    def test_manual_offline_device_does_not_fall_back_to_emulator(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manual_adb = root / "manual-adb.exe"
+            mumu_adb = root / "mumu-adb.exe"
+            manual_adb.touch()
+            mumu_adb.touch()
+            reader = MobileProtocolReader(
+                ".", adb_path=manual_adb, adb_serial="R58M-OFFLINE"
+            )
+            emulator = EmulatorCandidate(
+                "mumu", mumu_adb, ("127.0.0.1:16384",), ("127.0.0.1:16384",)
+            )
+
+            with patch(
+                "qqpet_app.mobile_protocol.discover_running_emulators",
+                return_value=(emulator,),
+            ) as discover, patch(
+                "qqpet_app.mobile_protocol.subprocess.run",
+                return_value=SimpleNamespace(stdout="List of devices attached\n"),
+            ):
+                with self.assertRaisesRegex(
+                    MobileProtocolUnavailable, "R58M-OFFLINE.*未连接"
+                ):
+                    reader._resolve_device()
+
+            discover.assert_not_called()
+            self.assertEqual(reader.adb_path, manual_adb)
+            self.assertEqual(reader.adb_serial, "R58M-OFFLINE")
 
     def test_resolve_device_connects_mumu_before_usb_fallback(self) -> None:
         from tempfile import TemporaryDirectory
@@ -442,7 +477,10 @@ class MobileProtocolTests(unittest.TestCase):
             mumu_adb.touch()
             ld_adb.touch()
             reader = MobileProtocolReader(
-                ".", adb_path=mumu_adb, adb_serial="127.0.0.1:16416"
+                ".",
+                adb_path=mumu_adb,
+                adb_serial="127.0.0.1:16416",
+                automatic_device=True,
             )
             emulator = EmulatorCandidate(
                 "ldplayer", ld_adb, ("emulator-5554", "127.0.0.1:5555")

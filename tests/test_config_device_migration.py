@@ -37,6 +37,28 @@ class DeviceConfigMigrationTests(unittest.TestCase):
         self.assertEqual(mobile["adb_path"], "")
         self.assertEqual(mobile["adb_serial"], "")
 
+    def test_ldplayer_multi_instance_remains_manual(self) -> None:
+        mobile = self._load_mobile(
+            {
+                "adb_path": r"E:\leidian\LDPlayer14\adb.exe",
+                "adb_serial": "emulator-5558",
+            }
+        )
+        self.assertFalse(mobile["auto_device"])
+        self.assertEqual(mobile["adb_path"], r"E:\leidian\LDPlayer14\adb.exe")
+        self.assertEqual(mobile["adb_serial"], "emulator-5558")
+
+    def test_mumu_multi_instance_remains_manual(self) -> None:
+        mobile = self._load_mobile(
+            {
+                "adb_path": r"D:\MuMuPlayer\nx_main\adb.exe",
+                "adb_serial": "127.0.0.1:16416",
+            }
+        )
+        self.assertFalse(mobile["auto_device"])
+        self.assertEqual(mobile["adb_path"], r"D:\MuMuPlayer\nx_main\adb.exe")
+        self.assertEqual(mobile["adb_serial"], "127.0.0.1:16416")
+
     def test_custom_tcp_endpoint_remains_manual(self) -> None:
         mobile = self._load_mobile(
             {"adb_path": "", "adb_serial": "192.168.1.20:5555"}
