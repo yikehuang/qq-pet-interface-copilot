@@ -64,14 +64,12 @@ def save_manual_connection(store: ConfigStore, adb_path: str, adb_serial: str) -
     """Persist launcher connection overrides; blank values keep auto discovery."""
     path_text = os.path.expandvars(adb_path.strip().strip('"'))
     if path_text and not Path(path_text).is_file():
-        raise ValueError("手动指定的 ADB 程序不存在，请选择 MuMu 目录中的 adb.exe")
+        raise ValueError("手动指定的 ADB 程序不存在，请选择模拟器或 Android 平台工具中的 adb.exe")
     serial = adb_serial.strip()
-    if serial and not (
-        serial.startswith("emulator-")
-        or (":" in serial and serial.rsplit(":", 1)[1].isdigit())
-    ):
-        raise ValueError("模拟器连接地址格式不正确，例如：127.0.0.1:16384")
+    if serial and any(character.isspace() for character in serial):
+        raise ValueError("设备序列号不能包含空格或换行")
     config = store.data
+    config["mobile_protocol"]["auto_device"] = not path_text and not serial
     config["mobile_protocol"]["adb_path"] = path_text
     config["mobile_protocol"]["adb_serial"] = serial
     store.save(config)
@@ -85,8 +83,13 @@ class Launcher(tk.Tk):
         self.minsize(640, 540)
         self.store = ConfigStore(CONFIG_PATH)
         mobile = self.store.data["mobile_protocol"]
-        self.adb_path_var = tk.StringVar(value=str(mobile.get("adb_path") or ""))
-        self.adb_serial_var = tk.StringVar(value=str(mobile.get("adb_serial") or ""))
+        automatic = bool(mobile.get("auto_device", True))
+        self.adb_path_var = tk.StringVar(
+            value="" if automatic else str(mobile.get("adb_path") or "")
+        )
+        self.adb_serial_var = tk.StringVar(
+            value="" if automatic else str(mobile.get("adb_serial") or "")
+        )
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.running = False
         self._build()
@@ -126,7 +129,7 @@ class Launcher(tk.Tk):
         )
         ttk.Label(
             connection,
-            text="示例：ADB 程序选择 …\\MuMu Player 12\\nx_main\\adb.exe；连接地址填写 127.0.0.1:16384",
+            text="支持 MuMu、雷电模拟器和 USB 手机；通常留空即可自动识别。",
             foreground="#666",
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(5, 0))
 
@@ -162,7 +165,7 @@ class Launcher(tk.Tk):
 
     def _browse_adb(self) -> None:
         selected = filedialog.askopenfilename(
-            title="选择 MuMu 的 adb.exe",
+            title="选择 adb.exe",
             filetypes=(("ADB 程序", "adb.exe"), ("可执行程序", "*.exe")),
         )
         if selected:
@@ -240,8 +243,9 @@ class Launcher(tk.Tk):
             serial = reader.prepare_runtime(
                 DOWNLOAD_DIR, lambda message: self.events.put(("log", message))
             )
-            config["mobile_protocol"]["adb_path"] = str(reader.adb_path or "")
-            config["mobile_protocol"]["adb_serial"] = serial
+            if not config["mobile_protocol"].get("auto_device", True):
+                config["mobile_protocol"]["adb_path"] = str(reader.adb_path or "")
+                config["mobile_protocol"]["adb_serial"] = serial
             client = Scheduler._make_client(config)
             logged_in_uin = client.check_connection()
             self.events.put(("log", f"已连接模拟器手机 QQ {logged_in_uin}。"))
@@ -274,10 +278,11 @@ class Launcher(tk.Tk):
             serial = reader.prepare_runtime(
                 DOWNLOAD_DIR, lambda message: self.events.put(("log", message))
             )
-            config["mobile_protocol"]["adb_path"] = str(reader.adb_path or "")
-            config["mobile_protocol"]["adb_serial"] = serial
+            if not config["mobile_protocol"].get("auto_device", True):
+                config["mobile_protocol"]["adb_path"] = str(reader.adb_path or "")
+                config["mobile_protocol"]["adb_serial"] = serial
             self.store.save(config)
-            self.events.put(("log", "基础运行环境和 MuMu 手机协议均已准备完成。"))
+            self.events.put(("log", f"基础运行环境和{reader.device_name}手机协议均已准备完成。"))
             self.events.put(("retry", None))
         except Exception as exc:
             self.events.put(("error", str(exc)))

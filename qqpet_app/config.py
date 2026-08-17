@@ -19,7 +19,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "endpoint": "127.0.0.1:27042",
         "process_name": "com.tencent.mobileqq",
-        "adb_serial": "127.0.0.1:16416",
+        "auto_device": True,
+        "adb_serial": "",
         "adb_path": "",
         "auto_reconnect": True,
         "reconnect_initial_seconds": 3,
@@ -187,6 +188,30 @@ def _migrate_loaded(config: dict[str, Any]) -> dict[str, Any]:
         # Work used 0=unlimited and a positive number=limited before the UI had
         # an explicit switch, so retain that behavior during upgrade.
         work["limit_enabled"] = int(work.get("times_per_day", 0) or 0) > 0
+    mobile = migrated.get("mobile_protocol")
+    if isinstance(mobile, dict) and "auto_device" not in mobile:
+        path = str(mobile.get("adb_path") or "").strip()
+        serial = str(mobile.get("adb_serial") or "").strip()
+        normalized_path = path.replace("/", "\\").casefold()
+        known_emulator_path = any(
+            marker in normalized_path
+            for marker in ("\\mumu", "\\netease\\", "\\leidian\\", "\\ldplayer")
+        )
+        known_emulator_serial = (
+            serial.startswith("emulator-")
+            or serial.startswith("127.0.0.1:16")
+            or serial == "127.0.0.1:5555"
+        )
+        # Older launchers wrote their automatically discovered emulator back into
+        # these fields. Recognize those generated combinations while preserving
+        # USB serials and custom TCP endpoints as deliberate manual overrides.
+        mobile["auto_device"] = (
+            (not path and serial in {"", "127.0.0.1:16416"})
+            or (known_emulator_path and known_emulator_serial)
+        )
+        if mobile["auto_device"]:
+            mobile["adb_path"] = ""
+            mobile["adb_serial"] = ""
     return migrated
 
 

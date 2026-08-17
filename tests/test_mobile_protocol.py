@@ -9,18 +9,54 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from qqpet_app.mobile_protocol import (
+    EmulatorCandidate,
     MobileProtocolReader,
     MobileProtocolServerError,
     MobileProtocolUnavailable,
     FRIDA_TOOLS_VERSION,
     discover_adb_path,
+    discover_mumu_serials,
     frida_architecture,
+    parse_ldplayer_list2,
+    parse_ldplayer_runninglist,
+    parse_mumu_cli_serials,
+    reader_from_config,
     select_adb_serial,
 )
 from qqpet_app.proto import field_bytes, field_fixed32
 
 
 class MobileProtocolTests(unittest.TestCase):
+    def test_reader_auto_mode_ignores_saved_device_fields(self) -> None:
+        config = {
+            "mobile_protocol": {
+                "enabled": True,
+                "auto_device": True,
+                "adb_path": r"E:\\old\\adb.exe",
+                "adb_serial": "emulator-5554",
+            }
+        }
+        with patch(
+            "qqpet_app.mobile_protocol.discover_adb_path",
+            return_value=Path("auto-adb.exe"),
+        ) as discover:
+            reader = reader_from_config(config, project_root=".")
+        discover.assert_called_once_with(Path("."), "")
+        self.assertIsNotNone(reader)
+        self.assertEqual(reader.adb_serial, "")
+        self.assertTrue(reader.automatic_device)
+
+    def test_saved_ldplayer_adb_uses_ldplayer_name(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            adb = root / "adb.exe"
+            adb.touch()
+            (root / "ldconsole.exe").touch()
+            reader = MobileProtocolReader(".", adb_path=adb, adb_serial="emulator-5554")
+            self.assertEqual(reader.device_name, "雷电模拟器")
+
     def test_logged_out_runtime_is_rejected_even_when_uin_is_cached(self) -> None:
         reader = MobileProtocolReader(".")
         reader._connect = lambda: None  # type: ignore[method-assign]
@@ -149,6 +185,284 @@ class MobileProtocolTests(unittest.TestCase):
     def test_select_adb_serial_falls_back_to_running_mumu_instance(self) -> None:
         output = "List of devices attached\n127.0.0.1:16416\toffline\n127.0.0.1:16384\tdevice\n"
         self.assertEqual(select_adb_serial(output, "127.0.0.1:16416"), "127.0.0.1:16384")
+
+    def test_select_adb_serial_keeps_usb_device_support(self) -> None:
+        output = "List of devices attached\nR58M123ABC\tdevice\n"
+        self.assertEqual(select_adb_serial(output), "R58M123ABC")
+
+    def test_discovered_mumu_instance_is_preferred_in_auto_mode(self) -> None:
+        output = "List of devices attached\nR58M123ABC\tdevice\n127.0.0.1:16384\tdevice\n"
+        self.assertEqual(
+            select_adb_serial(output, discovered=("127.0.0.1:16384",)),
+            "127.0.0.1:16384",
+        )
+
+    def test_manual_usb_device_remains_higher_priority_than_mumu(self) -> None:
+        output = "List of devices attached\nR58M123ABC\tdevice\n127.0.0.1:16384\tdevice\n"
+        self.assertEqual(
+            select_adb_serial(
+                output,
+                preferred="R58M123ABC",
+                discovered=("127.0.0.1:16384",),
+            ),
+            "R58M123ABC",
+        )
+
+    def test_parse_ldplayer_list2_returns_only_android_ready_instances(self) -> None:
+        output = (
+            "0,雷电模拟器,4853062,2757694,1,556,33088,1920,1080,280\n"
+            "1,停止实例,0,0,0,-1,-1,1920,1080,280\n"
+            "2,工作实例,4853064,2757696,1,558,33090,1920,1080,280\n"
+        )
+        self.assertEqual(
+            parse_ldplayer_list2(output),
+            ("emulator-5554", "127.0.0.1:5555", "emulator-5558", "127.0.0.1:5559"),
+        )
+
+    def test_parse_ldplayer_runninglist_supports_legacy_numeric_output(self) -> None:
+        self.assertEqual(
+            parse_ldplayer_runninglist("0,雷电模拟器\n"),
+            ("emulator-5554", "127.0.0.1:5555"),
+        )
+
+    def test_parse_mumu_cli_serials_returns_started_local_instances(self) -> None:
+        output = """{
+          "0": {"adb_host_ip":"127.0.0.1","adb_port":16384,"is_process_started":true,"is_android_started":true,"error_code":0},
+          "1": {"adb_host_ip":"127.0.0.1","adb_port":16416,"is_process_started":true,"is_android_started":false,"error_code":0},
+          "2": {"adb_host_ip":"192.168.1.2","adb_port":16448,"is_process_started":true,"is_android_started":true,"error_code":0}
+        }"""
+        self.assertEqual(parse_mumu_cli_serials(output), ("127.0.0.1:16384",))
+
+    def test_discovers_running_instance_through_mumu_cli(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            nx_main = Path(temporary) / "nx_main"
+            nx_main.mkdir()
+            adb = nx_main / "adb.exe"
+            cli = nx_main / "mumu-cli.exe"
+            adb.touch()
+            cli.touch()
+            result = SimpleNamespace(
+                stdout='{"0":{"adb_host_ip":"127.0.0.1","adb_port":16384,'
+                '"is_process_started":true,"is_android_started":true,"error_code":0}}'
+            )
+            with patch("qqpet_app.mobile_protocol.subprocess.run", return_value=result) as run:
+                self.assertEqual(discover_mumu_serials(adb), ("127.0.0.1:16384",))
+            self.assertEqual(
+                run.call_args.args[0],
+                [str(cli), "info", "--vmindex", "all"],
+            )
+
+    def test_resolve_device_connects_cli_instance_after_stale_default(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            adb = Path(temporary) / "adb.exe"
+            adb.touch()
+            reader = MobileProtocolReader(
+                ".", adb_path=adb, adb_serial="127.0.0.1:16416"
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command, **_kwargs):
+                calls.append(command)
+                if command[-1] == "devices":
+                    return SimpleNamespace(
+                        stdout="List of devices attached\n127.0.0.1:16384\tdevice\n"
+                    )
+                return SimpleNamespace(stdout="")
+
+            emulator = EmulatorCandidate(
+                "mumu", adb, ("127.0.0.1:16384",), ("127.0.0.1:16384",)
+            )
+            with patch(
+                "qqpet_app.mobile_protocol.discover_running_emulators",
+                return_value=(emulator,),
+            ), patch("qqpet_app.mobile_protocol.subprocess.run", side_effect=fake_run):
+                self.assertEqual(reader._resolve_device(), "127.0.0.1:16384")
+
+            discovered_connect = [str(adb), "connect", "127.0.0.1:16384"]
+            stale_connect = [str(adb), "connect", "127.0.0.1:16416"]
+            device_calls = [index for index, call in enumerate(calls) if call == [str(adb), "devices"]]
+            self.assertLess(calls.index(discovered_connect), device_calls[-1])
+            self.assertLess(calls.index(stale_connect), device_calls[0])
+
+    def test_resolve_device_connects_mumu_before_usb_fallback(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            adb = Path(temporary) / "adb.exe"
+            adb.touch()
+            reader = MobileProtocolReader(".", adb_path=adb, adb_serial="")
+
+            def fake_run(command, **_kwargs):
+                if command[-1] == "devices":
+                    return SimpleNamespace(
+                        stdout=(
+                            "List of devices attached\n"
+                            "R58M123ABC\tdevice\n"
+                            "127.0.0.1:16384\tdevice\n"
+                        )
+                    )
+                return SimpleNamespace(stdout="")
+
+            emulator = EmulatorCandidate(
+                "mumu", adb, ("127.0.0.1:16384",), ("127.0.0.1:16384",)
+            )
+            with patch(
+                "qqpet_app.mobile_protocol.discover_running_emulators",
+                return_value=(emulator,),
+            ), patch("qqpet_app.mobile_protocol.subprocess.run", side_effect=fake_run):
+                self.assertEqual(reader._resolve_device(), "127.0.0.1:16384")
+
+    def test_resolve_device_waits_for_mumu_started_after_launcher(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            adb = Path(temporary) / "adb.exe"
+            adb.touch()
+            reader = MobileProtocolReader(".", adb_path=adb, adb_serial="")
+            device_outputs = iter(
+                (
+                    "List of devices attached\n",
+                    "List of devices attached\n",
+                    "List of devices attached\n127.0.0.1:16384\tdevice\n",
+                )
+            )
+            emulator = EmulatorCandidate(
+                "mumu", adb, ("127.0.0.1:16384",), ("127.0.0.1:16384",)
+            )
+            discovered = iter(((), (emulator,)))
+            clock = iter((0.0, 0.0, 2.0))
+            messages: list[str] = []
+
+            def fake_run(command, **_kwargs):
+                if command[-1] == "devices":
+                    return SimpleNamespace(stdout=next(device_outputs))
+                return SimpleNamespace(stdout="")
+
+            with patch(
+                "qqpet_app.mobile_protocol.discover_running_emulators",
+                side_effect=lambda: next(discovered),
+            ), patch(
+                "qqpet_app.mobile_protocol.subprocess.run", side_effect=fake_run
+            ), patch(
+                "qqpet_app.mobile_protocol.time.monotonic",
+                side_effect=lambda: next(clock),
+            ), patch("qqpet_app.mobile_protocol.time.sleep", return_value=None):
+                self.assertEqual(
+                    reader._resolve_device(wait_seconds=90, report=messages.append),
+                    "127.0.0.1:16384",
+                )
+
+            self.assertTrue(any("等待安卓模拟器" in message for message in messages))
+
+    def test_auto_reader_does_not_keep_previous_online_emulator(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            previous_adb = root / "previous-adb.exe"
+            running_adb = root / "running-adb.exe"
+            previous_adb.touch()
+            running_adb.touch()
+            reader = MobileProtocolReader(
+                ".",
+                adb_path=previous_adb,
+                adb_serial="emulator-5554",
+                automatic_device=True,
+            )
+            emulator = EmulatorCandidate(
+                "mumu", running_adb, ("127.0.0.1:16384",), ("127.0.0.1:16384",)
+            )
+
+            def fake_run(command, **_kwargs):
+                if command[0] == str(previous_adb) and command[-1] == "devices":
+                    return SimpleNamespace(
+                        stdout="List of devices attached\nemulator-5554\tdevice\n"
+                    )
+                if command[0] == str(running_adb) and command[-1] == "devices":
+                    return SimpleNamespace(
+                        stdout="List of devices attached\n127.0.0.1:16384\tdevice\n"
+                    )
+                return SimpleNamespace(stdout="")
+
+            with patch(
+                "qqpet_app.mobile_protocol.discover_running_emulators",
+                return_value=(emulator,),
+            ), patch("qqpet_app.mobile_protocol.subprocess.run", side_effect=fake_run):
+                self.assertEqual(reader._resolve_device(), "127.0.0.1:16384")
+            self.assertEqual(reader.adb_path, running_adb)
+            self.assertEqual(reader.device_name, "MuMu 模拟器")
+
+    def test_manual_ldplayer_adb_prefers_ldplayer_when_both_run(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ld_adb = root / "ld-adb.exe"
+            mumu_adb = root / "mumu-adb.exe"
+            ld_adb.touch()
+            mumu_adb.touch()
+            (root / "ldconsole.exe").touch()
+            reader = MobileProtocolReader(".", adb_path=ld_adb, adb_serial="")
+            mumu = EmulatorCandidate(
+                "mumu", mumu_adb, ("127.0.0.1:16384",), ("127.0.0.1:16384",)
+            )
+            ldplayer = EmulatorCandidate(
+                "ldplayer", ld_adb, ("emulator-5554", "127.0.0.1:5555")
+            )
+
+            def fake_run(command, **_kwargs):
+                if command[0] == str(ld_adb) and command[-1] == "devices":
+                    return SimpleNamespace(
+                        stdout="List of devices attached\nemulator-5554\tdevice\n"
+                    )
+                if command[0] == str(mumu_adb) and command[-1] == "devices":
+                    return SimpleNamespace(
+                        stdout="List of devices attached\n127.0.0.1:16384\tdevice\n"
+                    )
+                return SimpleNamespace(stdout="")
+
+            with patch(
+                "qqpet_app.mobile_protocol.discover_running_emulators",
+                return_value=(mumu, ldplayer),
+            ), patch("qqpet_app.mobile_protocol.subprocess.run", side_effect=fake_run):
+                self.assertEqual(reader._resolve_device(), "emulator-5554")
+            self.assertEqual(reader.device_name, "雷电模拟器")
+
+    def test_resolve_device_switches_to_running_ldplayer_adb(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            mumu_adb = root / "mumu-adb.exe"
+            ld_adb = root / "ld-adb.exe"
+            mumu_adb.touch()
+            ld_adb.touch()
+            reader = MobileProtocolReader(
+                ".", adb_path=mumu_adb, adb_serial="127.0.0.1:16416"
+            )
+            emulator = EmulatorCandidate(
+                "ldplayer", ld_adb, ("emulator-5554", "127.0.0.1:5555")
+            )
+
+            def fake_run(command, **_kwargs):
+                if command[0] == str(ld_adb) and command[-1] == "devices":
+                    return SimpleNamespace(
+                        stdout="List of devices attached\nemulator-5554\tdevice\n"
+                    )
+                return SimpleNamespace(stdout="List of devices attached\n")
+
+            with patch(
+                "qqpet_app.mobile_protocol.discover_running_emulators",
+                return_value=(emulator,),
+            ), patch("qqpet_app.mobile_protocol.subprocess.run", side_effect=fake_run):
+                self.assertEqual(reader._resolve_device(), "emulator-5554")
+
+            self.assertEqual(reader.adb_path, ld_adb)
+            self.assertEqual(reader.device_name, "雷电模拟器")
 
     def test_frida_architecture_uses_kernel_architecture(self) -> None:
         self.assertEqual(frida_architecture("aarch64\n"), "arm64")

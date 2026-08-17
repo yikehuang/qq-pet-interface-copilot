@@ -12,9 +12,9 @@ English: A PC-side QQ pet automation assistant under active validation. The curr
 
 如需提交问题，可先导出诊断包，检查内容后再附加到 GitHub Issue。默认不做后台遥测；若以后启用自动回传，应使用由项目维护者控制的私有 HTTPS 接收服务和每位用户独立的撤销密钥，不能把仓库写入 Token 固定在客户端中。
 
-## 重要变更：NapCat 宠物接口失效，切换 MuMu 手机规则版
+## 重要变更：NapCat 宠物接口失效，切换 Android 手机规则版
 
-当前版本已经停用 NapCatQQ、OneBot 和电脑版 QQ 封包链路，状态读取及任务写入统一改走 MuMu 模拟器中的 Android 手机 QQ 协议。NapCat 的 Native 层实际上能够收到服务器回包；修复其空回包交接后，服务器返回的真实原因是 `errorCode=319`、`[oidb] rule type not match appid`。这表示服务器拒绝电脑版 QQ 会话的 AppID/规则类型，不是 `petId` 错误或 OneBot 掉线。
+当前版本已经停用 NapCatQQ、OneBot 和电脑版 QQ 封包链路，状态读取及任务写入统一改走本机 Android 模拟器或 USB 手机中的 QQ 协议。NapCat 的 Native 层实际上能够收到服务器回包；修复其空回包交接后，服务器返回的真实原因是 `errorCode=319`、`[oidb] rule type not match appid`。这表示服务器拒绝电脑版 QQ 会话的 AppID/规则类型，不是 `petId` 错误或 OneBot 掉线。
 
 本机日志显示，2026-08-11 16:03:55（北京时间）仍能完成真实学习结算，16:07:15 起同一读取命令持续失败；最窄观测窗口为 **16:03:55—16:07:15**。这只代表已观测账号/线路，服务器可能采用灰度策略。完整技术说明见 [NapCat QQ 宠物接口失效说明](docs/napcat-appid-policy-20260811.md)。
 
@@ -41,7 +41,7 @@ NapCatQQ 相关兼容代码可能暂时保留在历史模块中，方便旧版�
 | 好友每日访问 | 可用 | 每轮合并当前 QQ 好友与服务器宠物好友池，读取动态页面路径后发送真实访问，并复查好友页面；支持每日断点续跑与独立踩踩开关 |
 | 好友自动照顾 | 已实现（待首次名单实测） | 已验证可读取指定好友真实体力；低于阈值时发送好友 petId 喂食请求，并以体力上涨作为成功依据 |
 
-本地协议、客户端解析、调度与好友缓存测试目前为 **107/107 通过**。
+本地协议、客户端解析、调度与好友缓存测试目前为 **174/174 通过**。
 
 ## 调度逻辑
 
@@ -99,12 +99,12 @@ NapCatQQ 相关兼容代码可能暂时保留在历史模块中，方便旧版�
 双击 `start-interface-copilot.bat`，启动器会依次完成：
 
 1. 检查 Microsoft VC++ 2015–2022 x64 必备运行库；缺失时只从 Microsoft 官方地址下载，验证 Authenticode 数字签名后静默安装。
-2. 自动查找 MuMu 12 自带的 ADB，并选择当前在线的模拟器实例。
+2. 自动查找 MuMu、雷电模拟器或 Android 平台工具中的 ADB，并选择当前运行的模拟器实例或已连接的 USB 手机。
 3. 检查手机协议组件；缺失时从 Frida 官方 Release 下载固定版本，完成 SHA-256 校验后安装并启动。
 4. 从模拟器中已登录的手机 QQ 读取当前账号和宠物资料。
 5. 验证宠物状态后保存本机配置并打开控制台。
 
-Release 中的 `QQ宠物助手.exe` 已内置 Python、Tcl/Tk 图形界面、HTTPS/证书、加密、OnePush 和 Frida 客户端依赖，普通用户不需要另外安装 Python 或执行 `pip install`。当前版本要求使用 MuMu 12，在设置中开启 Root 权限，并保持模拟器和已登录的手机 QQ 运行。
+Release 中的 `QQ宠物助手.exe` 已内置 Python、Tcl/Tk 图形界面、HTTPS/证书、加密、OnePush 和 Frida 客户端依赖，普通用户不需要另外安装 Python 或执行 `pip install`。当前版本已支持自动识别 MuMu 和雷电模拟器，也保留 USB Android 设备连接；目标设备必须提供 ADB Root，并保持设备和已登录的手机 QQ 运行。
 
 首次接入时，启动器会通过模拟器中的手机 QQ 调用本人资料接口，直接从服务器读取并校验 `petId`，随后自动保存。启动器不会导出 QQ 会话，也不会把会话数据上传到网络。
 
@@ -138,7 +138,7 @@ QQ 宠物助手读取服务器状态和动态规则
 重新读取服务器状态验证结果，并写入 runs/ 每日进度
 ```
 
-本项目不包含 QQ 或模拟器。手机协议服务端组件仅在首次接入时从 Frida 官方 Release 下载并校验，不进入仓库。GPL-3.0-only 只覆盖本仓库代码；QQ、MuMu 与 Frida 分别遵循其自身许可和使用条款。当前版本运行时需要本机 MuMu 调试连接。
+本项目不包含 QQ 或模拟器。手机协议服务端组件仅在首次接入时从 Frida 官方 Release 下载并校验，不进入仓库。GPL-3.0-only 只覆盖本仓库代码；QQ、模拟器与 Frida 分别遵循其自身许可和使用条款。当前版本运行时需要可用的 ADB Root 调试连接。
 
 ## 测试
 
@@ -156,7 +156,7 @@ py -3 -m unittest discover -s tests -v
 
 感谢 [490720818/qq-pet-copilot](https://github.com/490720818/qq-pet-copilot) 作者的开源工作。该项目基于 uiautomator2、RapidOCR 和 scrcpy 实现 QQ 宠物界面自动化，其统一调度、状态照顾、学习/打工场景编排、任务进度持久化以及图形界面等设计，为本项目早期的功能规划和交互设计提供了重要启发。
 
-本项目目前采用 MuMu 中真实 Android QQ 会话的协议调用方案，与上述项目的界面自动化实现路线不同。此处致谢表示设计思路上的启发与对开源贡献的尊重，不表示两个项目存在官方隶属关系，也不表示本项目直接复制了对方代码。
+本项目目前采用 Android 设备中真实 QQ 会话的协议调用方案，与上述项目的界面自动化实现路线不同。此处致谢表示设计思路上的启发与对开源贡献的尊重，不表示两个项目存在官方隶属关系，也不表示本项目直接复制了对方代码。
 
 Special thanks to the author of [490720818/qq-pet-copilot](https://github.com/490720818/qq-pet-copilot). Its open-source UI-automation approach and designs for scheduling, pet care, learning/workflows, persistent progress, and GUI interaction provided valuable inspiration during this project's early planning. The two projects use different technical approaches and are not officially affiliated.
 
@@ -183,7 +183,7 @@ Special thanks to the author of [490720818/qq-pet-copilot](https://github.com/49
 
 ### 获取帮助
 
-如果你在安装、MuMu/手机协议接入、宠物 ID 获取、接口连接、功能测试或运行过程中遇到问题，可以通过 QQ 联系：
+如果你在安装、Android 设备/手机协议接入、宠物 ID 获取、接口连接、功能测试或运行过程中遇到问题，可以通过 QQ 联系：
 
 **QQ群：828742040**
 

@@ -22,19 +22,33 @@ class LauncherTests(unittest.TestCase):
             launcher.save_manual_connection(store, str(adb), "127.0.0.1:16384")
             self.assertEqual(store.data["mobile_protocol"]["adb_path"], str(adb))
             self.assertEqual(store.data["mobile_protocol"]["adb_serial"], "127.0.0.1:16384")
+            self.assertFalse(store.data["mobile_protocol"]["auto_device"])
             launcher.save_manual_connection(store, "", "")
             self.assertEqual(store.data["mobile_protocol"]["adb_path"], "")
             self.assertEqual(store.data["mobile_protocol"]["adb_serial"], "")
+            self.assertTrue(store.data["mobile_protocol"]["auto_device"])
 
-    def test_manual_connection_rejects_invalid_address(self) -> None:
+    def test_manual_connection_accepts_usb_serial(self) -> None:
         class Store:
             data = {"mobile_protocol": {"adb_path": "", "adb_serial": ""}}
 
             def save(self, value):
                 self.data = value
 
-        with self.assertRaisesRegex(ValueError, "格式不正确"):
-            launcher.save_manual_connection(Store(), "", "127.0.0.1")
+        store = Store()
+        launcher.save_manual_connection(store, "", "R58M123ABC")
+        self.assertEqual(store.data["mobile_protocol"]["adb_serial"], "R58M123ABC")
+        self.assertFalse(store.data["mobile_protocol"]["auto_device"])
+
+    def test_manual_connection_rejects_whitespace_in_serial(self) -> None:
+        class Store:
+            data = {"mobile_protocol": {"adb_path": "", "adb_serial": ""}}
+
+            def save(self, value):
+                self.data = value
+
+        with self.assertRaisesRegex(ValueError, "不能包含空格"):
+            launcher.save_manual_connection(Store(), "", "bad serial")
 
     def test_frozen_console_child_uses_independent_pyinstaller_environment(self) -> None:
         command, environment = launcher.console_process_spec(frozen=True)

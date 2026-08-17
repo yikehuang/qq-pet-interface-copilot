@@ -54,8 +54,9 @@ FRIEND_VISIT_DIR = ROOT / "runs"
 SETTING_FIELDS = [
     ("mobile_protocol.enabled", "启用模拟器手机协议读取", bool),
     ("mobile_protocol.endpoint", "手机协议本机地址", str),
-    ("mobile_protocol.adb_serial", "模拟器连接地址", str),
-    ("mobile_protocol.adb_path", "ADB 程序路径（留空自动查找）", str),
+    ("mobile_protocol.auto_device", "自动识别设备（开启时忽略下面两个手动字段）", bool),
+    ("mobile_protocol.adb_serial", "手动设备序列号/连接地址", str),
+    ("mobile_protocol.adb_path", "手动 ADB 程序路径", str),
     ("mobile_protocol.auto_reconnect", "手机协议断开后自动重连", bool),
     ("mobile_protocol.reconnect_initial_seconds", "自动重连初始间隔（秒）", float),
     ("mobile_protocol.reconnect_max_seconds", "自动重连最大间隔（秒）", float),
