@@ -17,6 +17,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "mobile_protocol": {
         "enabled": True,
+        # frida-server 端口（frida 官方默认 27042）；被占用时程序自动切 27043
         "endpoint": "127.0.0.1:27042",
         "process_name": "com.tencent.mobileqq",
         "auto_device": True,

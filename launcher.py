@@ -64,7 +64,7 @@ def save_manual_connection(store: ConfigStore, adb_path: str, adb_serial: str) -
     """Persist launcher connection overrides; blank values keep auto discovery."""
     path_text = os.path.expandvars(adb_path.strip().strip('"'))
     if path_text and not Path(path_text).is_file():
-        raise ValueError("手动指定的 ADB 程序不存在，请选择模拟器或 Android 平台工具中的 adb.exe")
+        raise ValueError("手动指定的 ADB 程序不存在，请选择模拟器或 Android 平台工具中的 adb")
     serial = adb_serial.strip()
     if serial and any(character.isspace() for character in serial):
         raise ValueError("设备序列号不能包含空格或换行")
@@ -164,10 +164,11 @@ class Launcher(tk.Tk):
         threading.Thread(target=target, daemon=True).start()
 
     def _browse_adb(self) -> None:
-        selected = filedialog.askopenfilename(
-            title="选择 adb.exe",
-            filetypes=(("ADB 程序", "adb.exe"), ("可执行程序", "*.exe")),
-        )
+        if sys.platform == "win32":
+            filetypes = (("ADB 程序", "adb.exe"), ("可执行程序", "*.exe"))
+        else:
+            filetypes = (("ADB 程序", "adb"), ("所有文件", "*"))
+        selected = filedialog.askopenfilename(title="选择 adb", filetypes=filetypes)
         if selected:
             self.adb_path_var.set(selected)
 
