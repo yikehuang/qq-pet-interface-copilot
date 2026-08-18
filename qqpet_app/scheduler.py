@@ -34,6 +34,8 @@ from .optimizer import (
     AdaptiveDecision,
     choose_adaptive_plan,
     derive_auto_optimization_inputs,
+    _fatigue_multiplier_at,
+    _resource_cost,
 )
 
 
@@ -489,6 +491,45 @@ class Scheduler:
                 return "school"
             return "work" if self._under_limit(config, counts, "work") else None
         return "work" if self._under_limit(config, counts, "work") else None
+
+    def _work_unprofitable_now(
+        self, client: NapCatClient, config: dict, values: PetValues
+    ) -> bool:
+        """非优化器模式下，判断当前最短岗位打工是否亏本（净收益 <= 0）。
+
+        打工收益随疲劳打折，但体力/清洁恢复成本固定不变。疲劳进入
+        12–24 小时段后，最短岗位收益被打到 10%，通常低于恢复成本，
+        此时继续打工只会越打越亏，应停止。目录读取失败时不拦截，
+        保留原有调度行为。
+        """
+        state = self.progress.optimizer_state(values.gold)
+        active_minutes = int(state.get("active_minutes", 0))
+        multiplier = float(_fatigue_multiplier_at(active_minutes))
+        if multiplier >= 1.0:
+            return False  # 0–8 小时全收益段，最短岗位必赚
+        try:
+            jobs = client.query_work_catalog().jobs
+        except QQPetError:
+            return False
+        available = [
+            job
+            for job in jobs
+            if bool(getattr(job, "can_do", False))
+            and int(getattr(job, "sub_event_type", 0)) > 0
+            and int(getattr(job, "duration_seconds", 0)) < 2**31 - 1
+            and float(getattr(job, "reward_value", 0)) > 0
+        ]
+        if not available:
+            return False
+        shortest = min(available, key=lambda job: int(getattr(job, "duration_seconds", 0)))
+        pay = float(getattr(shortest, "reward_value", 0))
+        opt = config.get("optimization", {})
+        hunger = float(_resource_cost(shortest, "体力", float(opt.get("work_hunger_cost", 4))))
+        clean = float(_resource_cost(shortest, "清洁", float(opt.get("work_clean_cost", 2))))
+        hunger_unit = float(opt.get("biscuit_price", 5)) / max(1.0, float(opt.get("biscuit_restore", 10)))
+        clean_unit = float(opt.get("soap_price", 2)) / max(1.0, float(opt.get("soap_restore", 10)))
+        expense = hunger * hunger_unit + clean * clean_unit
+        return pay * multiplier - expense <= 0
 
     def _adaptive_decision(
         self, client: NapCatClient, config: dict, values: PetValues
@@ -1457,6 +1498,9 @@ class Scheduler:
                 )
             except (QQPetError, ValueError, RuntimeError, AttributeError) as exc:
                 self.log(f"动态优化目录读取失败，保留原调度逻辑：{exc}")
+        if action == "work" and not optimization_enabled and self._work_unprofitable_now(client, config, values):
+            self.log("当前疲劳段打工净收益为负，已跳过打工以避免亏本")
+            action = None
         if not action:
             self.activity("空闲：今日任务已完成")
             self.log("今日已没有符合限制的任务")
