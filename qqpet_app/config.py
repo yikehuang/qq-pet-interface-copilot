@@ -17,9 +17,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "mobile_protocol": {
         "enabled": True,
+        # frida-server 端口（frida 官方默认 27042）；被占用时程序自动切 27043
         "endpoint": "127.0.0.1:27042",
         "process_name": "com.tencent.mobileqq",
-        "adb_serial": "127.0.0.1:16416",
+        "auto_device": True,
+        "adb_serial": "",
         "adb_path": "",
         "auto_reconnect": True,
         "reconnect_initial_seconds": 3,
@@ -187,6 +189,31 @@ def _migrate_loaded(config: dict[str, Any]) -> dict[str, Any]:
         # Work used 0=unlimited and a positive number=limited before the UI had
         # an explicit switch, so retain that behavior during upgrade.
         work["limit_enabled"] = int(work.get("times_per_day", 0) or 0) > 0
+    mobile = migrated.get("mobile_protocol")
+    if isinstance(mobile, dict) and "auto_device" not in mobile:
+        path = str(mobile.get("adb_path") or "").strip()
+        serial = str(mobile.get("adb_serial") or "").strip()
+        normalized_path = path.replace("/", "\\").casefold()
+        mumu_path = any(
+            marker in normalized_path for marker in ("\\mumu", "\\netease\\")
+        )
+        ldplayer_path = any(
+            marker in normalized_path for marker in ("\\leidian\\", "\\ldplayer")
+        )
+        # Older launchers wrote the first/default emulator instance back into
+        # these fields. Only migrate provider-specific default serials: higher
+        # ports and indexes may be a deliberate manual multi-instance selection.
+        generated_default = (
+            (mumu_path and serial == "127.0.0.1:16384")
+            or (ldplayer_path and serial in {"emulator-5554", "127.0.0.1:5555"})
+        )
+        mobile["auto_device"] = (
+            (not path and serial in {"", "127.0.0.1:16416"})
+            or generated_default
+        )
+        if mobile["auto_device"]:
+            mobile["adb_path"] = ""
+            mobile["adb_serial"] = ""
     return migrated
 
 

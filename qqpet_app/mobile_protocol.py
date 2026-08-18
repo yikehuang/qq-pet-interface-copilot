@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import lzma
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,6 +13,7 @@ import tarfile
 import threading
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,6 +35,10 @@ _READER_CACHE_LOCK = threading.Lock()
 
 FRIDA_VERSION = "17.16.4"
 FRIDA_TOOLS_VERSION = "14.10.4"
+# frida-server 默认监听端口（frida 官方默认）。若该端口已被其他版本的
+# frida-server 占用（例如同类工具 qq-pet-copilot 注入的 17.17.0），自动改用备用端口。
+FRIDA_PORT = 27042
+FRIDA_ALT_PORT = 27043
 FRIDA_JAVA_BRIDGE_SHA256 = "02cb922b7fea29a566bd9ae4a190fad24c503076f2497af5706d117033de6a0e"
 FRIDA_TOOLS_SDIST_SHA256 = "7a2c544b545d095040fffbd3768a287a426343dad89095b4a24f4b20382d926a"
 FRIDA_TOOLS_SDIST_URL = (
@@ -122,6 +129,67 @@ def _mumu_install_locations() -> list[Path]:
     return locations
 
 
+def _leidian_install_locations() -> list[Path]:
+    locations: list[Path] = []
+
+    def add_hint(raw_value: object) -> None:
+        value = os.path.expandvars(str(raw_value or "").strip())
+        if not value:
+            return
+        if value.startswith('"') and '"' in value[1:]:
+            value = value.split('"', 2)[1]
+        elif ".exe" in value.casefold():
+            value = value[: value.casefold().index(".exe") + 4]
+        path = Path(value)
+        if path.suffix.casefold() == ".exe":
+            path = path.parent
+        locations.append(path)
+
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            roots = (
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            )
+            for hive, key_name in roots:
+                try:
+                    with winreg.OpenKey(hive, key_name) as key:
+                        for index in range(winreg.QueryInfoKey(key)[0]):
+                            try:
+                                with winreg.OpenKey(key, winreg.EnumKey(key, index)) as item:
+                                    name = str(winreg.QueryValueEx(item, "DisplayName")[0])
+                                    if not any(marker in name.casefold() for marker in ("雷电", "ldplayer", "ld player")):
+                                        continue
+                                    for value_name in ("InstallLocation", "DisplayIcon", "UninstallString"):
+                                        try:
+                                            add_hint(winreg.QueryValueEx(item, value_name)[0])
+                                        except OSError:
+                                            continue
+                            except OSError:
+                                continue
+                except OSError:
+                    continue
+        except (ImportError, OSError):
+            pass
+    for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(variable)
+        if base:
+            locations.extend((Path(base) / "LDPlayer", Path(base) / "leidian"))
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+        drive = Path(f"{letter}:\\")
+        if not drive.exists():
+            continue
+        locations.extend((drive / "LDPlayer", drive / "leidian" / "LDPlayer14", drive / "leidian"))
+    unique: list[Path] = []
+    for location in locations:
+        if location not in unique:
+            unique.append(location)
+    return unique
+
+
 def discover_adb_path(project_root: str | Path, configured: str | Path = "") -> Path:
     root = Path(project_root)
     candidates: list[Path] = []
@@ -133,6 +201,19 @@ def discover_adb_path(project_root: str | Path, configured: str | Path = "") -> 
             root / "references" / "qq-pet-copilot" / "scrcpy-win64" / "adb.exe",
         )
     )
+    if sys.platform == "darwin":
+        # macOS：MuMu 模拟器 Pro 自带 adb 优先，其次 Homebrew / Android SDK
+        candidates.extend(
+            (
+                Path(
+                    "/Applications/MuMuPlayer.app/Contents/MacOS/"
+                    "MuMuEmulator.app/Contents/MacOS/tools/adb"
+                ),
+                Path("/opt/homebrew/bin/adb"),
+                Path("/usr/local/bin/adb"),
+                Path("~/Library/Android/sdk/platform-tools/adb").expanduser(),
+            )
+        )
     for location in _mumu_install_locations():
         candidates.extend(
             (
@@ -144,6 +225,8 @@ def discover_adb_path(project_root: str | Path, configured: str | Path = "") -> 
                 location / "MuMu Player 12" / "nx_device" / "15.0" / "shell" / "adb.exe",
             )
         )
+    for location in _leidian_install_locations():
+        candidates.extend((location / "adb.exe", location / "LDPlayer" / "adb.exe"))
     on_path = shutil.which("adb")
     if on_path:
         candidates.append(Path(on_path))
@@ -158,7 +241,52 @@ def discover_adb_path(project_root: str | Path, configured: str | Path = "") -> 
     return Path()
 
 
-def select_adb_serial(output: str, preferred: str = "") -> str:
+@dataclass(frozen=True)
+class EmulatorCandidate:
+    provider: str
+    adb_path: Path
+    serials: tuple[str, ...]
+    connect_serials: tuple[str, ...] = ()
+
+
+def _unique_existing_paths(candidates: list[Path]) -> tuple[Path, ...]:
+    existing: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = str(candidate).casefold()
+        if normalized in seen or not candidate.is_file():
+            continue
+        seen.add(normalized)
+        existing.append(candidate)
+    return tuple(existing)
+
+
+def _existing_mumu_adb_paths() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for location in _mumu_install_locations():
+        candidates.extend(
+            (
+                location / "nx_main" / "adb.exe",
+                location / "nx_device" / "12.0" / "shell" / "adb.exe",
+                location / "nx_device" / "15.0" / "shell" / "adb.exe",
+                location / "MuMu Player 12" / "nx_main" / "adb.exe",
+            )
+        )
+    return _unique_existing_paths(candidates)
+
+
+def _existing_ldplayer_adb_paths() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for location in _leidian_install_locations():
+        candidates.extend((location / "adb.exe", location / "LDPlayer" / "adb.exe"))
+    return _unique_existing_paths(candidates)
+
+
+def select_adb_serial(
+    output: str,
+    preferred: str = "",
+    discovered: tuple[str, ...] = (),
+) -> str:
     devices: list[str] = []
     for line in output.splitlines():
         parts = line.strip().split()
@@ -166,6 +294,9 @@ def select_adb_serial(output: str, preferred: str = "") -> str:
             devices.append(parts[0])
     if preferred and preferred in devices:
         return preferred
+    for serial in discovered:
+        if serial in devices:
+            return serial
     if not devices:
         return ""
     return sorted(
@@ -174,9 +305,195 @@ def select_adb_serial(output: str, preferred: str = "") -> str:
     )[0]
 
 
+def _ldplayer_serials(indexes: list[int]) -> tuple[str, ...]:
+    serials: list[str] = []
+    for index in indexes:
+        # LDPlayer's Android emulator serial for index 0 is emulator-5554;
+        # each additional instance increments the console port by two.
+        serials.extend((f"emulator-{5554 + index * 2}", f"127.0.0.1:{5555 + index * 2}"))
+    return tuple(dict.fromkeys(serials))
+
+
+def parse_ldplayer_list2(output: str) -> tuple[str, ...]:
+    """Map Android-ready instances from LDPlayer's structured list2 output."""
+    indexes: list[int] = []
+    for line in output.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) >= 5 and parts[0].isdigit() and parts[4] == "1":
+            indexes.append(int(parts[0]))
+    return _ldplayer_serials(indexes)
+
+
+def parse_ldplayer_runninglist(output: str) -> tuple[str, ...]:
+    """Parse legacy runninglist variants that return numeric instance indexes."""
+    indexes: list[int] = []
+    for line in output.splitlines():
+        first = line.split(",", 1)[0].strip()
+        if first.isdigit():
+            indexes.append(int(first))
+    return _ldplayer_serials(indexes)
+
+
+def discover_ldplayer_serials(adb_path: str | Path) -> tuple[str, ...]:
+    """Ask LDPlayer's controller for currently running instances."""
+    adb = Path(adb_path)
+    candidates = (adb.parent / "ldconsole.exe", adb.parent / "dnconsole.exe")
+    for console in candidates:
+        if not console.is_file():
+            continue
+        for command, parser in (
+            ("list2", parse_ldplayer_list2),
+            ("runninglist", parse_ldplayer_runninglist),
+        ):
+            try:
+                result = subprocess.run(
+                    [str(console), command],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            serials = parser(result.stdout)
+            if serials:
+                return serials
+    return ()
+
+
+def parse_mumu_cli_serials(output: str) -> tuple[str, ...]:
+    """Extract online local ADB endpoints from ``mumu-cli info`` JSON."""
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(payload, dict):
+        return ()
+
+    serials: list[str] = []
+    for instance in payload.values():
+        if not isinstance(instance, dict):
+            continue
+        if not instance.get("is_process_started") or not instance.get("is_android_started"):
+            continue
+        try:
+            error_code = int(instance.get("error_code") or 0)
+            port = int(instance.get("adb_port") or 0)
+        except (TypeError, ValueError):
+            continue
+        host = str(instance.get("adb_host_ip") or "127.0.0.1").strip()
+        if error_code != 0 or host not in {"127.0.0.1", "localhost", "::1"}:
+            continue
+        if not 1 <= port <= 65535:
+            continue
+        serial = f"{host}:{port}"
+        if serial not in serials:
+            serials.append(serial)
+    return tuple(serials)
+
+
+def discover_mumu_serials(adb_path: str | Path) -> tuple[str, ...]:
+    """Ask MuMu's own CLI for running instances when it is available."""
+    adb = Path(adb_path)
+    candidates = [adb.parent / "mumu-cli.exe"]
+    candidates.extend(
+        parent / "nx_main" / "mumu-cli.exe" for parent in tuple(adb.parents)[:3]
+    )
+    seen: set[str] = set()
+    for cli in candidates:
+        normalized = str(cli).casefold()
+        if normalized in seen or not cli.is_file():
+            continue
+        seen.add(normalized)
+        try:
+            result = subprocess.run(
+                [str(cli), "info", "--vmindex", "all"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        serials = parse_mumu_cli_serials(result.stdout)
+        if serials:
+            return serials
+    return ()
+
+
+def discover_running_emulators() -> tuple[EmulatorCandidate, ...]:
+    """Discover running instances independently of the currently selected ADB."""
+    candidates: list[EmulatorCandidate] = []
+    for adb_path in _existing_mumu_adb_paths():
+        serials = discover_mumu_serials(adb_path)
+        if serials:
+            candidates.append(
+                EmulatorCandidate("mumu", adb_path, serials, connect_serials=serials)
+            )
+    for adb_path in _existing_ldplayer_adb_paths():
+        serials = discover_ldplayer_serials(adb_path)
+        if serials:
+            candidates.append(EmulatorCandidate("ldplayer", adb_path, serials))
+    return tuple(
+        sorted(candidates, key=lambda item: (min(item.serials), str(item.adb_path).casefold()))
+    )
+
+
+def discover_mumu_macos_serial(adb_path: str | Path) -> str:
+    """探测 MuMu 模拟器当前 adb 端口（macOS 专用）。
+
+    MuMu Mac 的 adb 端口随实例重启而动态变化（实测出现过 5555 / 16448 /
+    16449 等，且同一实例可能同时监听多个端口）。这里扫描 MuMuEmulator
+    进程监听的 TCP 端口，逐个尝试 adb connect，返回第一个能连上且状态为
+    device 的 serial；失败返回空串（非 macOS 也返回空串）。
+    """
+    if sys.platform != "darwin":
+        return ""
+    try:
+        listing = subprocess.run(
+            ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    ports: list[int] = []
+    for line in listing.splitlines():
+        # lsof 的 COMMAND 列默认截断到 9 字符，MuMuEmulator 显示为 "MuMuEmula"
+        if "MuMuEmu" not in line:
+            continue
+        match = re.search(r":(\d+)\s+\(LISTEN\)", line)
+        if match:
+            ports.append(int(match.group(1)))
+    flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    for port in sorted(set(ports)):
+        serial = f"127.0.0.1:{port}"
+        try:
+            subprocess.run(
+                [str(adb_path), "connect", serial],
+                capture_output=True, timeout=8, **flags,
+            )
+            state = subprocess.run(
+                [str(adb_path), "-s", serial, "get-state"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=8, **flags,
+            ).stdout.strip()
+            if state == "device":
+                return serial
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return ""
+
+
 def frida_architecture(uname_machine: str) -> str:
     value = uname_machine.strip().lower()
-    if value in {"aarch64", "arm64"}:
+    # getprop ro.product.cpu.abi 常见值：arm64-v8a / x86_64 / x86；
+    # uname -m 值：aarch64 / arm64 / x86_64 / amd64
+    if value.startswith("arm64") or value in {"aarch64"}:
         return "arm64"
     if value in {"x86_64", "amd64"}:
         return "x86_64"
@@ -249,16 +566,21 @@ class MobileProtocolReader:
     def __init__(
         self,
         project_root: str | Path,
-        endpoint: str = "127.0.0.1:27042",
+        endpoint: str = f"127.0.0.1:{FRIDA_PORT}",
         process_name: str = "com.tencent.mobileqq",
         adb_path: str | Path = "",
-        adb_serial: str = "127.0.0.1:16416",
+        adb_serial: str = "",
+        automatic_device: bool = False,
     ) -> None:
         self.project_root = Path(project_root)
         self.endpoint = endpoint
         self.process_name = process_name
         self.adb_path = Path(adb_path) if adb_path else None
         self.adb_serial = adb_serial
+        self.automatic_device = bool(automatic_device)
+        self.emulator_provider = self._provider_from_adb(self.adb_path)
+        # 实际使用的 frida-server 端口：默认 FRIDA_PORT，检测到被占用时切到备用端口。
+        self.frida_port = FRIDA_PORT
         self._lock = threading.RLock()
         self._session: Any = None
         self._script: Any = None
@@ -266,6 +588,26 @@ class MobileProtocolReader:
         # frida-agent. Keep failed live sessions referenced instead of calling
         # script.unload()/session.detach() inside a running QQ process.
         self._retired_connections: list[tuple[Any, Any]] = []
+
+    @staticmethod
+    def _provider_from_adb(adb_path: Path | None) -> str:
+        if adb_path is None:
+            return "android"
+        if any((adb_path.parent / name).is_file() for name in ("ldconsole.exe", "dnconsole.exe")):
+            return "ldplayer"
+        if (adb_path.parent / "mumu-cli.exe").is_file() or any(
+            (parent / "nx_main" / "mumu-cli.exe").is_file()
+            for parent in tuple(adb_path.parents)[:3]
+        ):
+            return "mumu"
+        return "android"
+
+    @property
+    def device_name(self) -> str:
+        return {
+            "mumu": "MuMu 模拟器",
+            "ldplayer": "雷电模拟器",
+        }.get(self.emulator_provider, "Android 设备")
 
     def _load_frida(self):
         try:
@@ -325,11 +667,14 @@ class MobileProtocolReader:
         return raw.decode("utf-8")
 
     def _load_or_repair_java_bridge(self, bundled_root: Path) -> str:
-        component_root = (
-            Path(os.environ.get("LOCALAPPDATA") or self.project_root)
-            / "QQPetInterfaceCopilot"
-            / "components"
-        )
+        # 缓存目录按平台惯例选，避免 macOS/Linux 上落到项目根目录污染源码树
+        if sys.platform == "darwin":
+            cache_base = Path.home() / "Library" / "Caches"
+        elif os.name == "nt":
+            cache_base = Path(os.environ.get("LOCALAPPDATA") or self.project_root)
+        else:
+            cache_base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+        component_root = cache_base / "QQPetInterfaceCopilot" / "components"
         cached = component_root / f"frida-java-bridge-{FRIDA_TOOLS_VERSION}.js"
         candidates = [
             self.project_root / "tools" / "py312frida" / "frida_tools" / "bridges" / "java.js",
@@ -366,7 +711,7 @@ class MobileProtocolReader:
 
     def _adb(self, *args: str, timeout: float = 15, check: bool = True) -> subprocess.CompletedProcess[str]:
         if not self.adb_path or not self.adb_path.is_file():
-            raise MobileProtocolUnavailable("未找到 MuMu 模拟器的 ADB，请确认 MuMu 12 已正确安装")
+            raise MobileProtocolUnavailable("未找到可用的 ADB，请确认模拟器或 Android 平台工具已正确安装")
         command = [str(self.adb_path)]
         if self.adb_serial:
             command.extend(("-s", self.adb_serial))
@@ -383,35 +728,138 @@ class MobileProtocolReader:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise MobileProtocolUnavailable(f"MuMu ADB 操作失败：{exc}") from exc
+            raise MobileProtocolUnavailable(f"ADB 操作失败：{exc}") from exc
 
-    def _resolve_device(self) -> str:
-        if not self.adb_path or not self.adb_path.is_file():
-            raise MobileProtocolUnavailable("未找到 MuMu 模拟器的 ADB，请确认 MuMu 12 已正确安装")
-        base = [str(self.adb_path)]
+    @staticmethod
+    def _adb_devices(adb_path: Path, connect: tuple[str, ...] = ()) -> str:
+        base = [str(adb_path)]
         flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
-        subprocess.run(base + ["start-server"], capture_output=True, timeout=10, **flags)
-        result = subprocess.run(
-            base + ["devices"], capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=10, **flags
-        )
-        serial = select_adb_serial(result.stdout, self.adb_serial)
-        if not serial and self.adb_serial and ":" in self.adb_serial:
-            subprocess.run(base + ["connect", self.adb_serial], capture_output=True, timeout=10, **flags)
+        try:
+            subprocess.run(base + ["start-server"], capture_output=True, timeout=10, **flags)
+            for serial in connect:
+                if ":" in serial:
+                    subprocess.run(
+                        base + ["connect", serial], capture_output=True, timeout=10, **flags
+                    )
             result = subprocess.run(
                 base + ["devices"], capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=10, **flags
             )
-            serial = select_adb_serial(result.stdout, self.adb_serial)
-        if not serial:
-            raise MobileProtocolUnavailable("未发现已启动的 MuMu 模拟器，请先打开模拟器")
-        self.adb_serial = serial
-        return serial
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return result.stdout
+
+    def _resolve_device(
+        self,
+        wait_seconds: float = 0,
+        report: Callable[[str], None] | None = None,
+    ) -> str:
+        if not self.adb_path or not self.adb_path.is_file():
+            raise MobileProtocolUnavailable("未找到可用的 ADB，请确认模拟器或 Android 平台工具已正确安装")
+        deadline = time.monotonic() + max(0, float(wait_seconds))
+        waiting_reported = False
+
+        while True:
+            # A configured serial is an explicit device boundary. If it is offline,
+            # keep waiting for that device instead of silently switching accounts.
+            preferred_serial = "" if self.automatic_device else self.adb_serial
+            preferred_connect = (
+                (preferred_serial,) if preferred_serial and ":" in preferred_serial else ()
+            )
+            current_output = self._adb_devices(self.adb_path, preferred_connect)
+            preferred = select_adb_serial(current_output, preferred_serial)
+            if preferred_serial:
+                if preferred == preferred_serial:
+                    return preferred
+                if time.monotonic() >= deadline:
+                    break
+                if report is not None and not waiting_reported:
+                    report(f"正在等待手动指定的 Android 设备 {preferred_serial} 连接……")
+                    waiting_reported = True
+                time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+                continue
+
+            # Every provider is queried independently. Selecting a running instance
+            # switches both the serial and the matching ADB executable together. A
+            # manually chosen provider ADB remains authoritative when no serial was set.
+            emulators = discover_running_emulators()
+            if not self.automatic_device and self.emulator_provider != "android":
+                emulators = tuple(
+                    sorted(
+                        emulators,
+                        key=lambda item: item.provider != self.emulator_provider,
+                    )
+                )
+            for emulator in emulators:
+                output = self._adb_devices(emulator.adb_path, emulator.connect_serials)
+                serial = select_adb_serial(output, discovered=emulator.serials)
+                if serial in emulator.serials:
+                    self.adb_path = emulator.adb_path
+                    self.adb_serial = serial
+                    self.emulator_provider = emulator.provider
+                    return serial
+
+            # macOS：MuMu Mac 的 adb 端口随实例重启动态变化，扫描其监听端口兜底。
+            # discover_running_emulators() 依赖 Windows 下 MuMu/雷电的 CLI 命令，
+            # 在 macOS 上无法发现 MuMu Mac，这里用 lsof 扫描端口补齐。
+            if sys.platform == "darwin":
+                macos_serial = discover_mumu_macos_serial(self.adb_path)
+                if macos_serial:
+                    self.adb_serial = macos_serial
+                    return macos_serial
+
+            # No emulator controller reports a running instance. Keep generic ADB
+            # and USB devices as the final automatic fallback.
+            serial = select_adb_serial(current_output)
+            if serial:
+                self.adb_serial = serial
+                if not serial.startswith("emulator-") and ":" not in serial:
+                    self.emulator_provider = "android"
+                return serial
+            if time.monotonic() >= deadline:
+                break
+            if report is not None and not waiting_reported:
+                report("正在等待安卓模拟器或 USB 手机启动并连接……")
+                waiting_reported = True
+            time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
+
+        if preferred_serial:
+            raise MobileProtocolUnavailable(
+                f"手动指定的 Android 设备 {preferred_serial} 未连接或未处于在线状态"
+            )
+        raise MobileProtocolUnavailable(
+            "等待设备启动超时，未发现运行中的安卓模拟器或已连接的 Android 设备"
+        )
+
 
     def _frida_server_pid(self) -> str:
         return self._adb(
             "shell", "pidof", "frida-server", timeout=8, check=False
         ).stdout.strip()
+
+    def _port_listening(self, port: int) -> bool:
+        """检查模拟器内指定端口是否处于监听态（用于判断是否被其他 frida-server 占用）。"""
+        hex_port = f"{port:04X}"
+        try:
+            out = self._adb("shell", "cat", "/proc/net/tcp", timeout=8, check=False).stdout
+        except MobileProtocolUnavailable:
+            return False
+        for line in out.splitlines():
+            parts = line.split()
+            # /proc/net/tcp 每行：sl local_address rem_address st ...
+            if len(parts) >= 4 and parts[1].upper().endswith(f":{hex_port}") and parts[3] == "0A":
+                return True
+        return False
+
+    def _pick_frida_port(self) -> int:
+        """选择 frida-server 端口：默认 27042；若被其他 frida-server 占用则 27043。
+
+        只在「本工具的 frida-server 未运行」时被调用（见 _ensure_frida_server），
+        因此只需判断默认端口是否被别的 frida-server（例如同类工具注入的版本）占用。
+        """
+        if self._port_listening(FRIDA_PORT):
+            return FRIDA_ALT_PORT
+        return FRIDA_PORT
 
     def _start_frida_server(self, report: Callable[[str], None]) -> str:
         launch_error: MobileProtocolUnavailable | None = None
@@ -424,8 +872,10 @@ class MobileProtocolReader:
                 "shell",
                 "sh",
                 "-c",
-                "/data/local/tmp/frida-server --daemonize "
-                "</dev/null >/dev/null 2>&1 &",
+                # 单引号包裹整条命令：adb shell 会把参数用空格重拼，若不引号，
+                # sh -c 只认第一个词为命令，--listen/--daemonize 会被吞成 sh 位置参数。
+                f"'/data/local/tmp/frida-server --listen 127.0.0.1:{self.frida_port} "
+                "--daemonize </dev/null >/dev/null 2>&1 &'",
                 timeout=10,
                 check=False,
             )
@@ -445,24 +895,26 @@ class MobileProtocolReader:
 
         if launch_error is not None:
             raise MobileProtocolUnavailable(
-                f"手机协议组件未能在 MuMu 中启动；{launch_error}"
+                f"手机协议组件未能在{self.device_name}中启动；{launch_error}"
             ) from launch_error
-        raise MobileProtocolUnavailable("手机协议组件未能在 MuMu 中启动")
+        raise MobileProtocolUnavailable(f"手机协议组件未能在{self.device_name}中启动")
 
     def _ensure_adb_root(self, report: Callable[[str], None]) -> None:
         root_result: subprocess.CompletedProcess[str] | None = None
         try:
             root_result = self._adb("root", timeout=12, check=False)
         except MobileProtocolUnavailable:
-            # MuMu may restart adbd successfully but keep the host command open.
-            # Verify the resulting identity instead of treating that timeout as
-            # a definitive failure.
+            # An emulator may restart adbd successfully but keep the host command
+            # open. Verify the resulting identity instead of treating that timeout
+            # as a definitive failure.
             report("ADB Root 命令未及时返回，正在等待模拟器并核验 Root 状态……")
 
         if root_result is not None:
             output = (root_result.stdout + root_result.stderr).lower()
             if "cannot run as root" in output:
-                raise MobileProtocolUnavailable("MuMu 未开放 ADB Root，请在模拟器设置中开启 Root 权限后重启")
+                raise MobileProtocolUnavailable(
+                    f"{self.device_name}未开放 ADB Root，请在设备设置中开启 Root 权限后重启"
+                )
 
         try:
             self._adb("wait-for-device", timeout=35)
@@ -474,7 +926,9 @@ class MobileProtocolReader:
             self._adb("wait-for-device", timeout=35)
             identity = self._adb("shell", "id", timeout=12).stdout
         if "uid=0(root)" not in identity:
-            raise MobileProtocolUnavailable("MuMu ADB 尚未取得 Root 权限，请开启 Root 后重试")
+            raise MobileProtocolUnavailable(
+                f"{self.device_name}的 ADB 尚未取得 Root 权限，请开启 Root 后重试"
+            )
 
     def prepare_runtime(
         self,
@@ -482,8 +936,8 @@ class MobileProtocolReader:
         log: Callable[[str], None] | None = None,
     ) -> str:
         report = log or (lambda _message: None)
-        serial = self._resolve_device()
-        report(f"已发现 MuMu 模拟器：{serial}")
+        serial = self._resolve_device(wait_seconds=90, report=report)
+        report(f"已发现{self.device_name}：{serial}")
         self._ensure_adb_root(report)
 
         machine = self._adb(
@@ -520,7 +974,7 @@ class MobileProtocolReader:
             if not server.is_file():
                 with lzma.open(archive, "rb") as source, server.open("wb") as target:
                     shutil.copyfileobj(source, target)
-            report("正在安装手机协议组件到 MuMu……")
+            report(f"正在安装手机协议组件到{self.device_name}……")
             self._adb("push", str(server), "/data/local/tmp/frida-server", timeout=90)
             self._adb("shell", "chmod", "755", "/data/local/tmp/frida-server")
             self._adb(
@@ -532,12 +986,30 @@ class MobileProtocolReader:
         if not running:
             running = self._start_frida_server(report)
         self._ensure_forward()
-        report("MuMu 手机协议环境已就绪")
+        report(f"{self.device_name}手机协议环境已就绪")
         return serial
+
+    def _ensure_frida_server(self) -> None:
+        """frida-server 未运行时自动部署（下载+推送+启动），幂等。
+
+        让任何入口（控制台 / 菜单栏 / 调度器）都不必先跑 launcher 也能连上，
+        冷启动（重启模拟器 / 换机器）后双击即可自愈。失败时不吞掉错误，
+        留给 _connect 后续的 _ensure_forward / 进程枚举报出真实原因。
+        """
+        try:
+            if self._frida_server_pid():
+                return
+        except MobileProtocolUnavailable:
+            return
+        try:
+            self.frida_port = self._pick_frida_port()
+            self.prepare_runtime(self.project_root / "downloads")
+        except MobileProtocolUnavailable:
+            pass
 
     def _ensure_forward(self) -> None:
         if not self.adb_path or not self.adb_path.is_file():
-            raise MobileProtocolUnavailable("未找到 MuMu 模拟器的 ADB")
+            raise MobileProtocolUnavailable("未找到可用的 ADB")
         self._resolve_device()
         try:
             subprocess.run(
@@ -546,8 +1018,8 @@ class MobileProtocolReader:
                     "-s",
                     self.adb_serial,
                     "forward",
-                    "tcp:27042",
-                    "tcp:27042",
+                    f"tcp:{self.frida_port}",
+                    f"tcp:{self.frida_port}",
                 ],
                 check=True,
                 stdout=subprocess.DEVNULL,
@@ -557,6 +1029,28 @@ class MobileProtocolReader:
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise MobileProtocolUnavailable("无法建立模拟器手机协议通道") from exc
+
+    def _ensure_qq_running(self) -> None:
+        """QQ 未启动时自动拉起（am start SplashActivity），轮询等进程出现。
+
+        对齐 qq-pet-copilot 的 opener 行为：模拟器刚开机/QQ 被关时，
+        自动启动 QQ 再注入，最多重试 3 轮启动。
+        """
+        for attempt in range(3):
+            self._adb(
+                "shell", "am", "start", "-n",
+                f"{self.process_name}/.activity.SplashActivity",
+                timeout=15, check=False,
+            )
+            for _ in range(10):
+                pid = self._adb(
+                    "shell", "pidof", self.process_name, timeout=8, check=False
+                ).stdout.strip()
+                if pid:
+                    return
+                time.sleep(1)
+            if attempt < 2:
+                time.sleep(2)
 
     def _disconnect(self) -> None:
         script, session = self._script, self._session
@@ -582,6 +1076,8 @@ class MobileProtocolReader:
             except Exception:
                 self._disconnect()
 
+        # 冷启动自愈：frida-server 未运行则自动部署，再建立转发。
+        self._ensure_frida_server()
         self._ensure_forward()
         frida = self._load_frida()
         bundled_root = Path(getattr(sys, "_MEIPASS", self.project_root))
@@ -600,7 +1096,7 @@ class MobileProtocolReader:
             raise MobileProtocolUnavailable("手机协议读取脚本不存在")
         try:
             manager = frida.get_device_manager()
-            device = manager.add_remote_device(self.endpoint)
+            device = manager.add_remote_device(f"127.0.0.1:{self.frida_port}")
             processes = device.enumerate_processes()
             process = next((item for item in processes if item.name == self.process_name), None)
             # MuMu may expose an Android app label (for example "QQ") instead
@@ -612,6 +1108,17 @@ class MobileProtocolReader:
                 ).stdout.strip()
                 pids = {int(value) for value in pid_text.split() if value.isdigit()}
                 process = next((item for item in processes if item.pid in pids), None)
+            if process is None:
+                # QQ 未启动（模拟器刚开机/被关）：自动拉起后重新枚举进程
+                self._ensure_qq_running()
+                processes = device.enumerate_processes()
+                process = next((item for item in processes if item.name == self.process_name), None)
+                if process is None:
+                    pid_text = self._adb(
+                        "shell", "pidof", self.process_name, timeout=8, check=False
+                    ).stdout.strip()
+                    pids = {int(value) for value in pid_text.split() if value.isdigit()}
+                    process = next((item for item in processes if item.pid in pids), None)
             if process is None:
                 raise MobileProtocolUnavailable("模拟器 QQ 尚未启动或未登录")
             session = device.attach(process.pid)
@@ -788,19 +1295,41 @@ class MobileProtocolReader:
         )
 
 
+def default_project_root() -> Path:
+    """项目根目录（源码运行 = 仓库根；打包后 = 用户数据目录）。
+
+    macOS 打包成 .app 后，config.yaml / runs / downloads 不能写在 .app 内部
+    （更新会丢、也难找），改放 ~/Library/Application Support/QQPetInterfaceCopilot；
+    其他平台 frozen 沿用 exe 同目录的便携式约定。
+    """
+    if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            return (
+                Path.home()
+                / "Library"
+                / "Application Support"
+                / "QQPetInterfaceCopilot"
+            )
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
 def reader_from_config(config: dict, project_root: str | Path | None = None) -> MobileProtocolReader | None:
     settings = config.get("mobile_protocol") or {}
     if not bool(settings.get("enabled", False)):
         return None
-    root = Path(project_root or Path(__file__).resolve().parent.parent)
-    adb_setting = str(settings.get("adb_path") or "").strip()
+    root = Path(project_root or default_project_root())
+    automatic = bool(settings.get("auto_device", True))
+    adb_setting = "" if automatic else str(settings.get("adb_path") or "").strip()
+    adb_serial = "" if automatic else str(settings.get("adb_serial") or "").strip()
     adb_path = discover_adb_path(root, adb_setting)
     key = (
         str(root),
-        str(settings.get("endpoint", "127.0.0.1:27042")),
+        str(settings.get("endpoint", f"127.0.0.1:{FRIDA_PORT}")),
         str(settings.get("process_name", "com.tencent.mobileqq")),
         str(adb_path),
-        str(settings.get("adb_serial", "127.0.0.1:16416")),
+        adb_serial,
+        str(automatic),
     )
     with _READER_CACHE_LOCK:
         reader = _READER_CACHE.get(key)
@@ -811,6 +1340,7 @@ def reader_from_config(config: dict, project_root: str | Path | None = None) -> 
                 process_name=key[2],
                 adb_path=key[3],
                 adb_serial=key[4],
+                automatic_device=automatic,
             )
             _READER_CACHE[key] = reader
         return reader

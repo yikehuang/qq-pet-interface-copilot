@@ -132,7 +132,7 @@ class Scheduler:
         self.log(message)
         self._send_notification_async(
             "QQ 宠物助手已暂停",
-            f"{message}\n请在 MuMu 模拟器中重新登录配置账号。",
+            f"{message}\n请在当前 Android 设备中重新登录配置账号。",
             "login_guard",
         )
 
