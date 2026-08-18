@@ -192,7 +192,7 @@ def select_adb_serial(output: str, preferred: str = "") -> str:
     )[0]
 
 
-def discover_mumu_serial(adb_path: str | Path) -> str:
+def discover_mumu_macos_serial(adb_path: str | Path) -> str:
     """探测 MuMu 模拟器当前 adb 端口（macOS 专用）。
 
     MuMu Mac 的 adb 端口随实例重启而动态变化（实测出现过 5555 / 16448 /
@@ -470,7 +470,7 @@ class MobileProtocolReader:
         if not serial:
             # MuMu Mac 的 adb 端口随实例重启动态变化：自动扫描 MuMuEmulator
             # 进程监听端口并 connect，找到当前真实端口。
-            discovered = discover_mumu_serial(self.adb_path)
+            discovered = discover_mumu_macos_serial(self.adb_path)
             if discovered:
                 self.adb_serial = discovered
                 serial = discovered
