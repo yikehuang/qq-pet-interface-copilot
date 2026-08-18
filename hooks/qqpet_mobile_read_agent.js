@@ -169,4 +169,109 @@ rpc.exports = {
     }
     return sendOidbPacket(commandName, command, subCommand, bodyHex);
   },
+
+  // 打开 QQ 宠物主页（PetMainFragment）供用户查看。与 OIDB 读写共用同一个
+  // frida script / Java bridge（不新建第二个 session，避免两个 frida-agent
+  // 的 JNI hook 在同一个 QQ 进程内冲突导致崩溃）。
+  openPetPage() {
+    return new Promise((resolve, reject) => {
+      Java.perform(() => {
+        try {
+          const Intent = Java.use('android.content.Intent');
+          const Unit = Java.use('kotlin.Unit');
+          const Function1 = Java.use('kotlin.jvm.functions.Function1');
+          const FragmentHost = Java.use(
+            'com.tencent.mobileqq.activity.QPublicFragmentActivity'
+          );
+          const PetMainFragment = Java.use(
+            'com.tencent.mobileqq.qqpet.main.PetMainFragment'
+          );
+          const Sdk = Java.use('com.tencent.mobileqq.qqpet.sdk.a');
+          const MobileQQ = Java.use('mqq.app.MobileQQ');
+
+          let uin = '';
+          try {
+            uin = String(
+              MobileQQ.sMobileQQ.value.peekAppRuntime().getCurrentAccountUin()
+            );
+          } catch (_) {}
+          if (!/^\d{5,12}$/.test(uin)) {
+            reject(new Error('无法读取当前登录 QQ'));
+            return;
+          }
+
+          let activity = null;
+          Java.choose('com.tencent.mobileqq.activity.SplashActivity', {
+            onMatch: function (candidate) {
+              if (!activity && !candidate.isFinishing() && !candidate.isDestroyed()) {
+                try {
+                  activity = Java.retain(candidate);
+                } catch (_) {}
+              }
+            },
+            onComplete: function () {
+              if (!activity) {
+                reject(new Error('没有找到 QQ 主界面，请先打开并登录手机 QQ'));
+                return;
+              }
+
+              const Callback = Java.registerClass({
+                name: 'com.tencent.mobileqq.qqpet.OpenPageCallback' + Date.now(),
+                implements: [Function1],
+                methods: {
+                  invoke: function () {
+                    Java.scheduleOnMainThread(function () {
+                      try {
+                        const intent = Intent.$new();
+                        intent.putExtra('petUin', uin);
+                        intent.putExtra('pageData', '{}');
+                        intent.putExtra('from_adopt', false);
+                        intent.putExtra('adopt_closing_pose_id', 0);
+                        FragmentHost.start
+                          .overload(
+                            'android.content.Context',
+                            'android.content.Intent',
+                            'java.lang.Class'
+                          )
+                          .call(
+                            FragmentHost,
+                            activity,
+                            intent,
+                            PetMainFragment.class
+                          );
+                        resolve({ ok: true, uin: uin });
+                      } catch (e) {
+                        reject(e);
+                      }
+                    });
+                    return Unit.INSTANCE.value;
+                  },
+                },
+              });
+
+              try {
+                const sdkClass = Sdk.class;
+                const singleton = sdkClass.getDeclaredField('a');
+                singleton.setAccessible(true);
+                const sdk = singleton.get(null);
+                const initMethod = sdkClass.getDeclaredMethod(
+                  'd',
+                  Java.array('java.lang.Class', [Function1.class])
+                );
+                initMethod.setAccessible(true);
+                initMethod.invoke(
+                  sdk,
+                  Java.array('java.lang.Object', [Callback.$new()])
+                );
+              } catch (e) {
+                reject(new Error('SDK 初始化失败：' + (e.stack || String(e))));
+              }
+            },
+          });
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+  },
 };

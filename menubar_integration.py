@@ -67,6 +67,12 @@ def attach_menubar(win, hide_on_close: bool = True) -> NSObject:
             show_item.setTarget_(self)
             menu.addItem_(show_item)
 
+            open_pet_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                "打开宠物主页", "openPetPage:", ""
+            )
+            open_pet_item.setTarget_(self)
+            menu.addItem_(open_pet_item)
+
             menu.addItem_(NSMenuItem.separatorItem())
             quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
                 "退出", "quitApp:", "q"
@@ -91,6 +97,12 @@ def attach_menubar(win, hide_on_close: bool = True) -> NSObject:
                     self.win._stop()
                 else:
                     self.win._start()
+            except Exception:  # noqa: BLE001
+                pass
+
+        def openPetPage_(self, _sender) -> None:
+            try:
+                self.win._open_pet_page()
             except Exception:  # noqa: BLE001
                 pass
 

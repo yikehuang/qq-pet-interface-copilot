@@ -719,6 +719,24 @@ class MobileProtocolReader:
             self._retired_connections.append((script, session))
             del self._retired_connections[:-4]
 
+    def open_pet_page(self) -> bool:
+        """打开 QQ 宠物主页（UI 层面，仅供查看，不触发任何宠物操作）。
+
+        复用协议 agent 的 frida script（self._script）调用 exports.openPetPage()，
+        不新建 session：实测新建第二个 frida session + SDK 初始化会与协议 agent
+        的 Java bridge 冲突导致 QQ 崩溃，改为在同一个 script / 同一个 Java bridge
+        内完成打开动作后稳定。
+        """
+        self._connect()  # 确保协议 agent 连接就绪（幂等）
+        assert self._script is not None
+        try:
+            result = self._script.exports_sync.openPetPage()
+        except Exception as exc:
+            raise MobileProtocolUnavailable(f"打开宠物主页失败：{exc}") from exc
+        if not (result and result.get("ok")):
+            raise MobileProtocolUnavailable("打开宠物主页未确认成功")
+        return True
+
     def _connect(self) -> None:
         if self._script is not None:
             try:
