@@ -1469,11 +1469,17 @@ class Scheduler:
         option = config[action].get("attribute") or config[action].get("option")
         if action == "school":
             self.activity("正在获取当前阶段课程")
-            preferred_course = (
-                adaptive.course_sub_event
-                if adaptive and adaptive.course_sub_event
-                else int(config["school"].get("course_sub_event", 0))
-            )
+            # 用户固定课程优先于优化器建议（与打工分支一致）。
+            user_course = int(config["school"].get("course_sub_event", 0))
+            user_fixed_course = bool(user_course)
+            if user_fixed_course:
+                preferred_course = user_course
+            else:
+                preferred_course = (
+                    adaptive.course_sub_event
+                    if adaptive and adaptive.course_sub_event
+                    else 0
+                )
             try:
                 result = client.start_school(option, preferred_course)
             except (QQPetEmptyResponse, QQPetConnectionError) as exc:
@@ -1506,7 +1512,12 @@ class Scheduler:
                     client, config, "school", result.story_id
                 )
             response_story = f"，storyId={result.story_id}" if result.story_id else ""
-            selection = "指定" if preferred_course else "当前阶段最短时长"
+            if preferred_course and user_fixed_course:
+                selection = "指定（用户固定）"
+            elif preferred_course:
+                selection = "优化器建议"
+            else:
+                selection = "当前阶段最短时长"
             self.log(
                 f"已选择{selection}的{course.reward}课程“{course.name}”"
                 f"（{course.duration}），真实开课指令已发送{response_story}；"
@@ -1528,16 +1539,26 @@ class Scheduler:
                 self.activity("等待宠物满足打工职业要求")
                 return "work_blocked"
             self.activity("正在获取开放职业和岗位")
-            career_type = (
-                adaptive.career_type
-                if adaptive and adaptive.career_type
-                else int(config["work"].get("career_type", 0))
-            )
-            preferred_job = (
-                adaptive.job_sub_event
-                if adaptive and adaptive.job_sub_event
-                else int(config["work"].get("job_sub_event", 0))
-            )
+            # 用户显式设置的固定岗位拥有最高优先级；优化器的建议只是「自动」层，
+            # 只有在用户未固定岗位（career_type 与 job_sub_event 均为 0）时才采用，
+            # 避免优化器旁路掉用户在设置里明确选择的岗位。
+            user_career = int(config["work"].get("career_type", 0))
+            user_job = int(config["work"].get("job_sub_event", 0))
+            user_fixed = bool(user_career or user_job)
+            if user_fixed:
+                career_type = user_career
+                preferred_job = user_job
+            else:
+                career_type = (
+                    adaptive.career_type
+                    if adaptive and adaptive.career_type
+                    else 0
+                )
+                preferred_job = (
+                    adaptive.job_sub_event
+                    if adaptive and adaptive.job_sub_event
+                    else 0
+                )
             strategy = config["work"].get("strategy", "shortest_duration")
             hired_friend = self._select_work_hire(client, config)
             hired_uin = hired_friend.user_id if hired_friend else ""
@@ -1670,7 +1691,13 @@ class Scheduler:
             if result.story_id:
                 self._encourage_story_if_needed(client, config, "work", result.story_id)
             response_story = f"，storyId={result.story_id}" if result.story_id else ""
-            selection = "指定" if preferred_job else "时长最短"
+            # 来源区分：用户固定岗位 vs 优化器建议 vs 最短时长（均未固定时）。
+            if preferred_job and user_fixed:
+                selection = "指定（用户固定）"
+            elif preferred_job:
+                selection = "优化器建议"
+            else:
+                selection = "时长最短"
             friend_name = (
                 hired_friend.nickname or hired_friend.pet_name or hired_friend.user_id
                 if hired_friend
