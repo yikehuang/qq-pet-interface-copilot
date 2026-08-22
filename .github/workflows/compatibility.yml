@@ -33,3 +33,23 @@ jobs:
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
+
+  protocol-host:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: protocol-host/go.mod
+          cache-dependency-path: protocol-host/go.sum
+
+      - name: Test and build Android QQ protocol host
+        shell: pwsh
+        run: |
+          Push-Location protocol-host
+          go test ./...
+          go build -trimpath -o QQPetProtocolHost.exe .
+          Pop-Location
