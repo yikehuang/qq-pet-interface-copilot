@@ -31,6 +31,21 @@ class StandaloneProtocolTests(unittest.TestCase):
             with self.assertRaisesRegex(StandaloneProtocolUnavailable, "不是 Android"):
                 reader.get_self_uin()
 
+    def test_rejects_obsolete_android_login_backend(self) -> None:
+        reader = StandaloneProtocolReader("http://127.0.0.1:17890")
+        with patch.object(
+            reader,
+            "_request",
+            return_value={
+                "ok": True,
+                "protocol_family": "android_qq",
+                "login_backend": "mirai_go_legacy",
+                "session_state": "offline",
+            },
+        ):
+            with self.assertRaisesRegex(StandaloneProtocolUnavailable, "旧版"):
+                reader.health()
+
     def test_oidb_read_uses_base64_and_requires_online_mobile_session(self) -> None:
         reader = StandaloneProtocolReader("http://127.0.0.1:17890")
         expected = b"server-body"

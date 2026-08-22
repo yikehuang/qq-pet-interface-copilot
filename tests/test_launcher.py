@@ -49,6 +49,16 @@ class LauncherTests(unittest.TestCase):
             launcher.os.environ.get("PYINSTALLER_RESET_ENVIRONMENT"),
         )
 
+    def test_source_acidify_host_uses_python_module(self) -> None:
+        command, environment = launcher.acidify_host_process_spec(frozen=False)
+        self.assertEqual(command, [launcher.sys.executable, "-m", "qqpet_app.acidify_host"])
+        self.assertNotIn("QQPET_APP_ROOT", environment)
+
+    def test_frozen_acidify_host_uses_independent_child(self) -> None:
+        command, environment = launcher.acidify_host_process_spec(frozen=True)
+        self.assertEqual(command, [launcher.sys.executable, "--acidify-host"])
+        self.assertEqual(environment["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+
 
 if __name__ == "__main__":
     unittest.main()

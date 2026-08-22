@@ -82,12 +82,17 @@ class StandaloneProtocolReader:
             raise StandaloneProtocolUnavailable(
                 "协议服务不是 Android 手机 QQ 会话，已拒绝发送宠物请求"
             )
+        backend = str(result.get("login_backend") or "").casefold()
+        if backend and backend != "acidify_android_session":
+            raise StandaloneProtocolUnavailable(
+                "检测到旧版手机协议核心；它已无法完成当前 Android QQ 登录，已拒绝使用"
+            )
         return result
 
     def get_self_uin(self) -> str:
         status = self.health()
         if str(status.get("session_state") or "").casefold() != "online":
-            raise StandaloneProtocolUnavailable("纯电脑手机 QQ 尚未登录，请先扫码")
+            raise StandaloneProtocolUnavailable("纯电脑手机 QQ 尚未登录，请先导入已授权会话")
         uin = str(status.get("uin") or "")
         if not uin.isdigit():
             raise StandaloneProtocolUnavailable("纯电脑协议服务未返回有效 QQ 账号")

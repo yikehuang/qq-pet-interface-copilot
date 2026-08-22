@@ -13,6 +13,7 @@ references/
 __pycache__/
 *.py[cod]
 .venv/
+node_modules/
 .idea/
 .vscode/
 

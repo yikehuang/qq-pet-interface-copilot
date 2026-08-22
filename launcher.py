@@ -12,6 +12,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from qqpet_app import __version__
+from qqpet_app.acidify_host import default_vault, import_android_session
 from qqpet_app.bootstrap import ensure_vc_runtime
 from qqpet_app.config import ConfigStore
 from qqpet_app.mobile_protocol import reader_from_config
@@ -60,6 +61,16 @@ def console_process_spec(frozen: bool | None = None) -> tuple[list[str], dict[st
     return command, child_env
 
 
+def acidify_host_process_spec(frozen: bool | None = None) -> tuple[list[str], dict[str, str]]:
+    """Return the modern Android protocol host command for this build."""
+    is_frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    child_env = os.environ.copy()
+    if is_frozen:
+        child_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        return [sys.executable, "--acidify-host"], child_env
+    return [sys.executable, "-m", "qqpet_app.acidify_host"], child_env
+
+
 def _configured_identity(store: ConfigStore) -> tuple[str, str]:
     config = store.data
     uin = str(config["account"].get("uin") or "")
@@ -92,7 +103,7 @@ class Launcher(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("QQ 宠物助手 · 一键启动")
-        self.geometry("720x590")
+        self.geometry("760x640")
         self.minsize(640, 540)
         self.store = ConfigStore(CONFIG_PATH)
         mobile = self.store.data["mobile_protocol"]
@@ -114,7 +125,7 @@ class Launcher(tk.Tk):
         ttk.Label(body, text="QQ 宠物助手", font=("Microsoft YaHei UI", 20, "bold")).pack(anchor="w")
         ttk.Label(
             body,
-            text="连接电脑中的安卓模拟器和手机 QQ，成功后直接打开控制台。",
+            text="纯电脑模式无需 MuMu/ADB；首次使用可导入已授权的 Android 会话。",
             foreground="#666",
         ).pack(anchor="w", pady=(6, 18))
         self.state_var = tk.StringVar(value="准备检查……")
@@ -160,6 +171,12 @@ class Launcher(tk.Tk):
         self.connect_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         self.install_button = ttk.Button(actions, text="检查手机协议环境", command=self.install_mobile_runtime)
         self.install_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        self.import_session_button = ttk.Button(
+            body,
+            text="导入已授权的 Android 会话…",
+            command=self.import_mobile_session,
+        )
+        self.import_session_button.pack(fill=tk.X, pady=(10, 0))
         self.update_button = ttk.Button(
             body,
             text=f"检查更新（当前 v{__version__}）",
@@ -180,6 +197,7 @@ class Launcher(tk.Tk):
         self.progress.start(12)
         self.connect_button.configure(state=tk.DISABLED)
         self.install_button.configure(state=tk.DISABLED)
+        self.import_session_button.configure(state=tk.DISABLED)
         threading.Thread(target=target, daemon=True).start()
 
     def _browse_adb(self) -> None:
@@ -193,6 +211,28 @@ class Launcher(tk.Tk):
     def _clear_manual_connection(self) -> None:
         self.adb_path_var.set("")
         self.adb_serial_var.set("")
+
+    def import_mobile_session(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="选择已授权的 Acidify Android 会话 JSON",
+            filetypes=(("Android 会话", "*.json"), ("所有文件", "*.*")),
+        )
+        if not selected:
+            return
+        try:
+            uin = import_android_session(selected, default_vault())
+            self.connection_mode_var.set("纯电脑手机协议（2.0）")
+            config = self.store.data
+            config["connection"]["mode"] = "standalone_mobile"
+            config["account"]["uin"] = uin
+            self.store.save(config)
+            self._append(f"Android 会话已用当前 Windows 用户加密保存：QQ {uin}。")
+            messagebox.showinfo(
+                "导入完成",
+                "会话已加密保存，QQ 密码未被接收或保存。现在可以重新连接。",
+            )
+        except Exception as exc:
+            messagebox.showerror("无法导入 Android 会话", str(exc))
 
     def _save_connection_fields(self) -> bool:
         try:
@@ -296,8 +336,7 @@ class Launcher(tk.Tk):
         self.events.put(("log", "正在连接纯电脑 Android QQ 协议服务……"))
         settings = config["standalone_protocol"]
         executable = str(settings.get("host_executable") or "").strip()
-        builtin = ROOT / "protocol-host" / "QQPetProtocolHost.exe"
-        host_path = Path(executable) if executable else builtin
+        host_path = Path(executable) if executable else None
         reader = standalone_reader_from_config(config)
         if reader is None:
             raise RuntimeError("纯电脑手机协议未启用")
@@ -305,9 +344,24 @@ class Launcher(tk.Tk):
         try:
             status = reader.health()
         except Exception:
-            if bool(settings.get("auto_start", True)) and host_path.is_file():
-                self.events.put(("log", "正在启动内置手机协议服务……"))
-                subprocess.Popen([str(host_path)], cwd=host_path.parent)
+            if bool(settings.get("auto_start", True)):
+                self.events.put(("log", "正在启动现代 Android 手机协议服务……"))
+                if host_path is not None:
+                    if not host_path.is_file():
+                        raise RuntimeError("手动指定的协议服务程序不存在")
+                    command, environment = [str(host_path)], os.environ.copy()
+                    working_directory = host_path.parent
+                else:
+                    command, environment = acidify_host_process_spec()
+                    working_directory = ROOT
+                subprocess.Popen(
+                    command,
+                    cwd=working_directory,
+                    env=environment,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
                 for _ in range(20):
                     time.sleep(0.5)
                     try:
@@ -389,6 +443,7 @@ class Launcher(tk.Tk):
         self.progress.stop()
         self.connect_button.configure(state=tk.NORMAL)
         self.install_button.configure(state=tk.NORMAL)
+        self.import_session_button.configure(state=tk.NORMAL)
 
     def _drain(self) -> None:
         try:
@@ -462,6 +517,11 @@ class Launcher(tk.Tk):
 
 
 if __name__ == "__main__":
+    if "--acidify-host" in sys.argv:
+        from qqpet_app.acidify_host import main as acidify_host_main
+
+        marker = sys.argv.index("--acidify-host")
+        raise SystemExit(acidify_host_main(sys.argv[marker + 1 :]))
     if "--console" in sys.argv:
         from main import MainWindow
 

@@ -9,7 +9,14 @@ a = Analysis(
     ["launcher.py"],
     pathex=[],
     binaries=[],
-    datas=[("hooks/qqpet_mobile_read_agent.js", "hooks")] + frida_tools_data + frida_java_fallback,
+    datas=[
+        ("hooks/qqpet_mobile_read_agent.js", "hooks"),
+        ("protocol-host-acidify/bridge.mjs", "protocol-host-acidify"),
+        ("protocol-host-acidify/package.json", "protocol-host-acidify"),
+        ("protocol-host-acidify/package-lock.json", "protocol-host-acidify"),
+        ("protocol-host-acidify/pnpm-lock.yaml", "protocol-host-acidify"),
+        ("protocol-host-acidify/THIRD_PARTY_NOTICES.md", "protocol-host-acidify"),
+    ] + frida_tools_data + frida_java_fallback,
     hiddenimports=[
         "encodings.idna",
         "main",
