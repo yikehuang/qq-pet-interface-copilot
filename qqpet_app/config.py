@@ -7,6 +7,16 @@ from typing import Any
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "connection": {
+        "mode": "legacy_mobile_bridge",
+    },
+    "standalone_protocol": {
+        "enabled": True,
+        "endpoint": "http://127.0.0.1:17890",
+        "timeout_seconds": 10,
+        "auto_start": True,
+        "host_executable": "",
+    },
     "napcat": {
         "url": "",
         "token": "",
@@ -229,6 +239,19 @@ class ConfigStore:
 
     @staticmethod
     def _validate(config: dict[str, Any]) -> None:
+        mode = str(config["connection"].get("mode") or "")
+        if mode not in {"legacy_mobile_bridge", "standalone_mobile"}:
+            raise ValueError(
+                "connection.mode 必须是 legacy_mobile_bridge/standalone_mobile"
+            )
+        standalone = config["standalone_protocol"]
+        if mode == "standalone_mobile" and not bool(standalone.get("enabled", True)):
+            raise ValueError("纯电脑手机协议模式下 standalone_protocol.enabled 必须开启")
+        endpoint = str(standalone.get("endpoint") or "").strip()
+        if not endpoint.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]", "https://127.0.0.1", "https://localhost", "https://[::1]")):
+            raise ValueError("纯电脑协议服务只允许使用本机地址")
+        if float(standalone.get("timeout_seconds", 0)) <= 0:
+            raise ValueError("standalone_protocol.timeout_seconds 必须大于 0")
         if not config["account"]["pet_id"]:
             raise ValueError("account.pet_id 不能为空")
         if config["mobile_protocol"].get("enabled") and not str(

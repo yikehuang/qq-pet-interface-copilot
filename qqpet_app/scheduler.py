@@ -30,6 +30,7 @@ from .pk_progress import PKProgress
 from .progress import DailyProgress
 from .notifications import NotificationManager
 from .mobile_protocol import reader_from_config
+from .standalone_protocol import reader_from_config as standalone_reader_from_config
 from .optimizer import (
     AdaptiveDecision,
     choose_adaptive_plan,
@@ -74,9 +75,15 @@ class Scheduler:
 
     @staticmethod
     def _make_client(config: dict) -> NapCatClient:
-        mobile_reader = reader_from_config(config)
+        mode = str((config.get("connection") or {}).get("mode") or "legacy_mobile_bridge")
+        if mode == "standalone_mobile":
+            mobile_reader = standalone_reader_from_config(config)
+            missing_message = "纯电脑手机协议服务尚未就绪，调度器不会回退到 MuMu 或桌面 QQ"
+        else:
+            mobile_reader = reader_from_config(config)
+            missing_message = "手机 QQ 协议未启用，调度器不会回退到 NapCat 或桌面接口"
         if mobile_reader is None:
-            raise QQPetError("手机 QQ 协议未启用，调度器不会回退到 NapCat 或桌面接口")
+            raise QQPetError(missing_message)
         return NapCatClient(
             config["napcat"]["url"],
             config["napcat"]["token"],

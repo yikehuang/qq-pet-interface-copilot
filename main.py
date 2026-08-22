@@ -52,6 +52,12 @@ FRIEND_VISIT_DIR = ROOT / "runs"
 
 
 SETTING_FIELDS = [
+    ("connection.mode", "连接模式", str),
+    ("standalone_protocol.enabled", "启用纯电脑手机协议", bool),
+    ("standalone_protocol.endpoint", "纯电脑协议本机地址", str),
+    ("standalone_protocol.timeout_seconds", "纯电脑协议超时（秒）", float),
+    ("standalone_protocol.auto_start", "启动助手时自动启动协议服务", bool),
+    ("standalone_protocol.host_executable", "协议服务程序（留空使用内置组件）", str),
     ("mobile_protocol.enabled", "启用模拟器手机协议读取", bool),
     ("mobile_protocol.endpoint", "手机协议本机地址", str),
     ("mobile_protocol.adb_serial", "模拟器连接地址", str),
@@ -152,6 +158,10 @@ SETTING_FIELDS = [
 ]
 
 CHOICE_FIELDS = {
+    "connection.mode": {
+        "纯电脑手机协议（2.0）": "standalone_mobile",
+        "MuMu 手机协议桥（1.5 兼容）": "legacy_mobile_bridge",
+    },
     "care.food_item": {
         "饼干": "biscuit",
         "虾仁": "shrimp",
@@ -175,7 +185,8 @@ CHOICE_FIELDS = {
 }
 
 SETTING_SECTIONS = (
-    ("connection", "连接与账号", ("mobile_protocol.", "account.")),
+    ("connection", "连接与账号", ("connection.", "standalone_protocol.", "account.")),
+    ("legacy_connection", "旧版 MuMu 兼容", ("mobile_protocol.",)),
     ("scheduler", "自动调度", ("scheduler.",)),
     ("optimization", "动态收益优化", ("optimization.",)),
     ("care", "自己的宠物照顾", ("care.",)),

@@ -1,4 +1,14 @@
 {
+  "connection": {
+    "mode": "standalone_mobile"
+  },
+  "standalone_protocol": {
+    "enabled": true,
+    "endpoint": "http://127.0.0.1:17890",
+    "timeout_seconds": 10,
+    "auto_start": true,
+    "host_executable": ""
+  },
   "napcat": {
     "url": "",
     "token": "",

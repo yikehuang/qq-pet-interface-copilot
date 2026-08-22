@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import queue
 import os
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -13,6 +15,10 @@ from qqpet_app import __version__
 from qqpet_app.bootstrap import ensure_vc_runtime
 from qqpet_app.config import ConfigStore
 from qqpet_app.mobile_protocol import reader_from_config
+from qqpet_app.standalone_protocol import (
+    StandaloneProtocolReader,
+    reader_from_config as standalone_reader_from_config,
+)
 from qqpet_app.scheduler import Scheduler
 from qqpet_app.updater import (
     UpdateInfo,
@@ -35,6 +41,11 @@ DOWNLOAD_DIR = (
     / "QQPetInterfaceCopilot"
     / "downloads"
 )
+CONNECTION_MODE_LABELS = {
+    "纯电脑手机协议（2.0）": "standalone_mobile",
+    "旧版 MuMu 兼容": "legacy_mobile_bridge",
+}
+CONNECTION_MODE_NAMES = {value: key for key, value in CONNECTION_MODE_LABELS.items()}
 def console_process_spec(frozen: bool | None = None) -> tuple[list[str], dict[str, str]]:
     """Return an independent console command and environment for this build."""
     is_frozen = getattr(sys, "frozen", False) if frozen is None else frozen
@@ -85,6 +96,10 @@ class Launcher(tk.Tk):
         self.minsize(640, 540)
         self.store = ConfigStore(CONFIG_PATH)
         mobile = self.store.data["mobile_protocol"]
+        mode = str(self.store.data.get("connection", {}).get("mode") or "legacy_mobile_bridge")
+        self.connection_mode_var = tk.StringVar(
+            value=CONNECTION_MODE_NAMES.get(mode, "旧版 MuMu 兼容")
+        )
         self.adb_path_var = tk.StringVar(value=str(mobile.get("adb_path") or ""))
         self.adb_serial_var = tk.StringVar(value=str(mobile.get("adb_serial") or ""))
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -107,28 +122,35 @@ class Launcher(tk.Tk):
         self.progress = ttk.Progressbar(body, mode="indeterminate")
         self.progress.pack(fill=tk.X, pady=(10, 14))
 
-        connection = ttk.LabelFrame(body, text="模拟器连接（留空自动识别）", padding=10)
+        connection = ttk.LabelFrame(body, text="连接方式", padding=10)
         connection.pack(fill=tk.X, pady=(0, 12))
         connection.columnconfigure(1, weight=1)
-        ttk.Label(connection, text="ADB 程序").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Label(connection, text="运行模式").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Combobox(
+            connection,
+            textvariable=self.connection_mode_var,
+            state="readonly",
+            values=tuple(CONNECTION_MODE_LABELS),
+        ).grid(row=0, column=1, columnspan=2, sticky="ew", pady=3)
+        ttk.Label(connection, text="ADB 程序").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
         ttk.Entry(connection, textvariable=self.adb_path_var).grid(
-            row=0, column=1, sticky="ew", pady=3
-        )
-        ttk.Button(connection, text="选择…", command=self._browse_adb).grid(
-            row=0, column=2, padx=(8, 0), pady=3
-        )
-        ttk.Label(connection, text="连接地址").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
-        ttk.Entry(connection, textvariable=self.adb_serial_var).grid(
             row=1, column=1, sticky="ew", pady=3
         )
-        ttk.Button(connection, text="恢复自动", command=self._clear_manual_connection).grid(
+        ttk.Button(connection, text="选择…", command=self._browse_adb).grid(
             row=1, column=2, padx=(8, 0), pady=3
+        )
+        ttk.Label(connection, text="连接地址").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(connection, textvariable=self.adb_serial_var).grid(
+            row=2, column=1, sticky="ew", pady=3
+        )
+        ttk.Button(connection, text="恢复自动", command=self._clear_manual_connection).grid(
+            row=2, column=2, padx=(8, 0), pady=3
         )
         ttk.Label(
             connection,
             text="示例：ADB 程序选择 …\\MuMu Player 12\\nx_main\\adb.exe；连接地址填写 127.0.0.1:16384",
             foreground="#666",
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(5, 0))
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(5, 0))
 
         self.log = tk.Text(body, height=11, state=tk.DISABLED, wrap=tk.WORD)
         self.log.pack(fill=tk.BOTH, expand=True)
@@ -174,9 +196,15 @@ class Launcher(tk.Tk):
 
     def _save_connection_fields(self) -> bool:
         try:
-            save_manual_connection(
-                self.store, self.adb_path_var.get(), self.adb_serial_var.get()
-            )
+            label = self.connection_mode_var.get().strip()
+            mode = CONNECTION_MODE_LABELS.get(label, label)
+            if mode == "legacy_mobile_bridge":
+                save_manual_connection(
+                    self.store, self.adb_path_var.get(), self.adb_serial_var.get()
+                )
+            config = self.store.data
+            config["connection"]["mode"] = mode
+            self.store.save(config)
             return True
         except ValueError as exc:
             self.state_var.set("连接设置有误")
@@ -231,8 +259,11 @@ class Launcher(tk.Tk):
             ensure_vc_runtime(
                 DOWNLOAD_DIR, lambda message: self.events.put(("log", message))
             )
-            self.events.put(("log", "正在连接安卓模拟器中的手机 QQ 协议……"))
             config = self.store.data
+            if str(config["connection"]["mode"]) == "standalone_mobile":
+                self._connect_standalone(config, preferred_uin, pet_id)
+                return
+            self.events.put(("log", "正在连接安卓模拟器中的手机 QQ 协议……"))
             config["mobile_protocol"]["enabled"] = True
             reader = reader_from_config(config)
             if reader is None:
@@ -261,12 +292,75 @@ class Launcher(tk.Tk):
         except Exception as exc:
             self.events.put(("error", str(exc)))
 
+    def _connect_standalone(self, config: dict, preferred_uin: str, pet_id: str) -> None:
+        self.events.put(("log", "正在连接纯电脑 Android QQ 协议服务……"))
+        settings = config["standalone_protocol"]
+        executable = str(settings.get("host_executable") or "").strip()
+        builtin = ROOT / "protocol-host" / "QQPetProtocolHost.exe"
+        host_path = Path(executable) if executable else builtin
+        reader = standalone_reader_from_config(config)
+        if reader is None:
+            raise RuntimeError("纯电脑手机协议未启用")
+        assert isinstance(reader, StandaloneProtocolReader)
+        try:
+            status = reader.health()
+        except Exception:
+            if bool(settings.get("auto_start", True)) and host_path.is_file():
+                self.events.put(("log", "正在启动内置手机协议服务……"))
+                subprocess.Popen([str(host_path)], cwd=host_path.parent)
+                for _ in range(20):
+                    time.sleep(0.5)
+                    try:
+                        status = reader.health()
+                        break
+                    except Exception:
+                        continue
+                else:
+                    raise RuntimeError("纯电脑协议服务启动后仍未就绪")
+            else:
+                raise RuntimeError(
+                    "纯电脑协议核心尚未安装。当前 2.0 分支已经完成助手侧接入，"
+                    "但登录/签名核心尚未通过只读验证，不能用 MuMu 或桌面 QQ 冒充。"
+                )
+        if str(status.get("session_state") or "").casefold() != "online":
+            self.events.put(("log", "请使用手机 QQ 扫描登录二维码……"))
+            self.events.put(("login_qr", reader.request_login_qr()))
+            for _ in range(120):
+                time.sleep(1)
+                status = reader.health()
+                if str(status.get("session_state") or "").casefold() == "online":
+                    break
+            else:
+                raise RuntimeError("二维码登录等待超时，请重新获取二维码")
+        client = Scheduler._make_client(config)
+        logged_in_uin = client.check_connection()
+        self.events.put(("log", f"纯电脑手机 QQ {logged_in_uin} 登录成功。"))
+        if not pet_id or preferred_uin != logged_in_uin:
+            self.events.put(("log", "正在从服务器读取宠物 ID……"))
+            profile = client.query_own_pet_profile(logged_in_uin)
+            pet_id = profile.pet_id
+            client.pet_id = pet_id
+        config["account"]["uin"] = logged_in_uin
+        config["account"]["pet_id"] = pet_id
+        self.store.save(config)
+        values = client.query_values()
+        self.events.put(("log", f"纯电脑手机协议只读验证成功，当前金币 {values.gold:.0f}。"))
+        self.events.put(("launch", None))
+
     def _install_worker(self) -> None:
         try:
             ensure_vc_runtime(
                 DOWNLOAD_DIR, lambda message: self.events.put(("log", message))
             )
             config = self.store.data
+            if str(config["connection"]["mode"]) == "standalone_mobile":
+                reader = standalone_reader_from_config(config)
+                if reader is None:
+                    raise RuntimeError("纯电脑手机协议未启用")
+                reader.health()
+                self.events.put(("log", "纯电脑协议服务已就绪，无需安装 MuMu/ADB/Frida。"))
+                self.events.put(("retry", None))
+                return
             config["mobile_protocol"]["enabled"] = True
             reader = reader_from_config(config)
             if reader is None:
@@ -295,6 +389,12 @@ class Launcher(tk.Tk):
                 if kind == "log":
                     self.state_var.set(str(payload))
                     self._append(str(payload))
+                elif kind == "login_qr":
+                    encoded = base64.b64encode(bytes(payload)).decode("ascii")
+                    self._qr_image = tk.PhotoImage(data=encoded)
+                    qr = tk.Toplevel(self)
+                    qr.title("使用手机 QQ 扫码登录")
+                    ttk.Label(qr, image=self._qr_image).pack(padx=24, pady=24)
                 elif kind == "launch":
                     self.state_var.set("连接成功，正在打开控制台……")
                     self.progress.stop()
