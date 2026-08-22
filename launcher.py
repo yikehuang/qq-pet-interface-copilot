@@ -85,10 +85,16 @@ def console_process_spec(
     return command, child_env
 
 
-def acidify_host_process_spec(frozen: bool | None = None) -> tuple[list[str], dict[str, str]]:
+def acidify_host_process_spec(
+    frozen: bool | None = None, sign_url: str = ""
+) -> tuple[list[str], dict[str, str]]:
     """Return the modern Android protocol host command for this build."""
     is_frozen = getattr(sys, "frozen", False) if frozen is None else frozen
     child_env = os.environ.copy()
+    if sign_url.strip():
+        child_env["QQPET_ANDROID_SIGN_URL"] = sign_url.strip()
+    else:
+        child_env.pop("QQPET_ANDROID_SIGN_URL", None)
     if is_frozen:
         child_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         return [sys.executable, "--acidify-host"], child_env
@@ -137,6 +143,8 @@ class Launcher(tk.Tk):
         )
         self.adb_path_var = tk.StringVar(value=str(mobile.get("adb_path") or ""))
         self.adb_serial_var = tk.StringVar(value=str(mobile.get("adb_serial") or ""))
+        standalone = self.store.data["standalone_protocol"]
+        self.sign_url_var = tk.StringVar(value=str(standalone.get("sign_url") or ""))
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.running = False
         self._build()
@@ -186,6 +194,17 @@ class Launcher(tk.Tk):
             text="示例：ADB 程序选择 …\\MuMu Player 12\\nx_main\\adb.exe；连接地址填写 127.0.0.1:16384",
             foreground="#666",
         ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(5, 0))
+        ttk.Label(connection, text="Android signer 地址").grid(
+            row=4, column=0, sticky="w", padx=(0, 8), pady=3
+        )
+        ttk.Entry(connection, textvariable=self.sign_url_var).grid(
+            row=4, column=1, columnspan=2, sticky="ew", pady=3
+        )
+        ttk.Label(
+            connection,
+            text="仅填写明确支持 Android QQ 9.2.80 的 signer，例如 http://127.0.0.1:端口/sign",
+            foreground="#666",
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(5, 0))
 
         self.log = tk.Text(body, height=11, state=tk.DISABLED, wrap=tk.WORD)
         self.log.pack(fill=tk.BOTH, expand=True)
@@ -295,6 +314,15 @@ class Launcher(tk.Tk):
                 )
             config = self.store.data
             config["connection"]["mode"] = mode
+            sign_url = self.sign_url_var.get().strip()
+            if sign_url and not sign_url.startswith(("http://", "https://")):
+                raise ValueError("Android signer 地址必须以 http:// 或 https:// 开头")
+            if sign_url.rstrip("/") in {
+                "http://127.0.0.1:17891",
+                "http://localhost:17891",
+            }:
+                raise ValueError("17891 是网页授权页地址，不是 Android signer 地址")
+            config["standalone_protocol"]["sign_url"] = sign_url
             self.store.save(config)
             return True
         except ValueError as exc:
@@ -403,7 +431,9 @@ class Launcher(tk.Tk):
                     command, environment = [str(host_path)], os.environ.copy()
                     working_directory = host_path.parent
                 else:
-                    command, environment = acidify_host_process_spec()
+                    command, environment = acidify_host_process_spec(
+                        sign_url=str(settings.get("sign_url") or "")
+                    )
                     working_directory = ROOT
                 subprocess.Popen(
                     command,

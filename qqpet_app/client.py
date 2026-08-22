@@ -838,12 +838,19 @@ class NapCatClient:
         common_root = parse_message(first_bytes(parse_message(common), 1))
 
         def current(field: int) -> float:
-            return first_float(parse_message(first_bytes(common_root, field)), 3)
+            item = parse_message(first_bytes(common_root, field))
+            value = first_float(item, 3)
+            if value == 0.0:
+                # Android QQ 9.3.50 keeps the same display command but returns
+                # the float in child field 2 instead of field 3.
+                value = first_float(item, 2)
+            return value
 
         gold_request = field_string(1, self.pet_id) + field_bytes(2, b"\x06")
         gold = self.send_oidb_read(*self.DISPLAY, gold_request).body
         gold_root = parse_message(first_bytes(parse_message(gold), 1))
-        gold_value = first_float(parse_message(first_bytes(gold_root, 5)), 3)
+        gold_item = parse_message(first_bytes(gold_root, 5))
+        gold_value = first_float(gold_item, 3) or first_float(gold_item, 2)
         return PetValues(current(1), current(2), current(3), current(4), gold_value)
 
     def feed(self, food_id: str = "") -> OidbResponse:

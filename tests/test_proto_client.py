@@ -552,6 +552,26 @@ class ProtoAndClientTests(unittest.TestCase):
         self.assertAlmostEqual(values.total, 91.9, places=2)
         self.assertEqual(values.gold, 1578.75)
 
+    def test_display_values_accept_qq_9350_child_field(self) -> None:
+        value_messages = [field_fixed32(2, value) for value in (100.0, 100.0, 100.0, 100.0)]
+        common_root = b"".join(field_bytes(index + 1, item) for index, item in enumerate(value_messages))
+        common_body = field_bytes(1, common_root)
+        gold_body = field_bytes(1, field_bytes(5, field_fixed32(2, 805.0)))
+        calls = 0
+
+        def transport(_command: str, _data: str) -> dict:
+            nonlocal calls
+            calls += 1
+            return oidb_response(38642, 1, common_body if calls == 1 else gold_body)
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        values = client.query_values()
+        self.assertEqual(values.feel, 100.0)
+        self.assertEqual(values.hunger, 100.0)
+        self.assertEqual(values.clean, 100.0)
+        self.assertEqual(values.total, 100.0)
+        self.assertEqual(values.gold, 805.0)
+
     def test_mobile_values_reader_is_preferred_without_sending_desktop_packet(self) -> None:
         expected = PetValues(98, 100, 99, 99.2, 2147)
         desktop_calls = 0

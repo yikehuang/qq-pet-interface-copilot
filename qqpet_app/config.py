@@ -16,6 +16,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "timeout_seconds": 10,
         "auto_start": True,
         "host_executable": "",
+        "sign_url": "",
     },
     "napcat": {
         "url": "",

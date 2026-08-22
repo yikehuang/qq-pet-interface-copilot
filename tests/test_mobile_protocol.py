@@ -258,6 +258,26 @@ class MobileProtocolTests(unittest.TestCase):
         self.assertAlmostEqual(values.total, 98.8, places=2)
         self.assertEqual(values.gold, 2147.0)
 
+    def test_mobile_state_accepts_qq_9350_display_field(self) -> None:
+        display = b"".join(
+            field_bytes(index, field_fixed32(2, value))
+            for index, value in enumerate((100.0, 100.0, 100.0, 100.0), start=1)
+        )
+        personal = field_bytes(4, display)
+        state = field_bytes(1, field_bytes(5, personal))
+        gold = field_bytes(1, field_bytes(5, field_fixed32(3, 805.0)))
+
+        reader = MobileProtocolReader(".")
+        replies = iter((state, gold))
+        reader._send_read = lambda _spec, _body: next(replies)  # type: ignore[method-assign]
+
+        values = reader.query_values("pet-id")
+        self.assertEqual(values.feel, 100.0)
+        self.assertEqual(values.hunger, 100.0)
+        self.assertEqual(values.clean, 100.0)
+        self.assertEqual(values.total, 100.0)
+        self.assertEqual(values.gold, 805.0)
+
 
 if __name__ == "__main__":
     unittest.main()

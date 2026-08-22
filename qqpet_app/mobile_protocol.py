@@ -782,7 +782,13 @@ class MobileProtocolReader:
 
     @staticmethod
     def _current(display: dict, field: int) -> float:
-        return first_float(parse_message(first_bytes(display, field)), 3)
+        item = parse_message(first_bytes(display, field))
+        value = first_float(item, 3)
+        if value == 0.0:
+            # Android QQ 9.3.50 moved display values from child field 3 to
+            # child field 2 while keeping the same OIDB command.
+            value = first_float(item, 2)
+        return value
 
     def query_values(self, pet_id: str) -> PetValues:
         if not pet_id:

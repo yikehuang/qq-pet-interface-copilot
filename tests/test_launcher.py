@@ -64,6 +64,16 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(command, [launcher.sys.executable, "-m", "qqpet_app.acidify_host"])
         self.assertNotIn("QQPET_APP_ROOT", environment)
 
+    def test_acidify_host_child_receives_signer_url_only_when_configured(self) -> None:
+        _, environment = launcher.acidify_host_process_spec(
+            frozen=False, sign_url="http://127.0.0.1:9000/sign"
+        )
+        self.assertEqual(environment["QQPET_ANDROID_SIGN_URL"], "http://127.0.0.1:9000/sign")
+
+    def test_acidify_host_child_does_not_keep_empty_signer_environment(self) -> None:
+        _, environment = launcher.acidify_host_process_spec(frozen=False, sign_url="")
+        self.assertNotIn("QQPET_ANDROID_SIGN_URL", environment)
+
     def test_frozen_acidify_host_uses_independent_child(self) -> None:
         command, environment = launcher.acidify_host_process_spec(frozen=True)
         self.assertEqual(command, [launcher.sys.executable, "--acidify-host"])
