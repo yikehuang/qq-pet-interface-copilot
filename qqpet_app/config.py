@@ -256,6 +256,7 @@ class ConfigStore:
     def save(self, config: dict[str, Any]) -> None:
         merged = _normalize(_merge(DEFAULT_CONFIG, config))
         self._validate(merged)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_suffix(self.path.suffix + ".tmp")
         temp.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temp.replace(self.path)

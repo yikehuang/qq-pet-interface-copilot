@@ -12,10 +12,15 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from qqpet_app import __version__
-from qqpet_app.acidify_host import default_vault, import_android_session
+from qqpet_app.acidify_host import (
+    default_vault,
+    export_android_session,
+    import_android_session,
+)
 from qqpet_app.bootstrap import ensure_vc_runtime
 from qqpet_app.config import ConfigStore
 from qqpet_app.mobile_protocol import reader_from_config
+from qqpet_app.paths import ROOT, config_path
 from qqpet_app.standalone_protocol import (
     StandaloneProtocolReader,
     reader_from_config as standalone_reader_from_config,
@@ -31,27 +36,46 @@ from qqpet_app.updater import (
 )
 
 
-ROOT = (
-    Path(sys.executable).resolve().parent
-    if getattr(sys, "frozen", False)
-    else Path(__file__).resolve().parent
-)
-CONFIG_PATH = ROOT / "config.yaml"
+CONFIG_PATH = config_path()
 DOWNLOAD_DIR = (
     Path(os.environ.get("LOCALAPPDATA") or ROOT)
     / "QQPetInterfaceCopilot"
     / "downloads"
+)
+ANDROID_SESSION_EXPORT_DIR = (
+    Path(os.environ.get("USERPROFILE") or Path.home())
+    / "Downloads"
+    / "QQPetInterfaceCopilot"
+    / "android-sessions"
 )
 CONNECTION_MODE_LABELS = {
     "纯电脑手机协议（2.0）": "standalone_mobile",
     "旧版 MuMu 兼容": "legacy_mobile_bridge",
 }
 CONNECTION_MODE_NAMES = {value: key for key, value in CONNECTION_MODE_LABELS.items()}
-def console_process_spec(frozen: bool | None = None) -> tuple[list[str], dict[str, str]]:
+
+
+def automatic_android_session_export_path(uin: str, now: float | None = None) -> Path:
+    """Return a non-overwriting export path in the user's Downloads folder."""
+    timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
+    safe_uin = "".join(ch for ch in str(uin) if ch.isdigit()) or "unknown"
+    destination = ANDROID_SESSION_EXPORT_DIR / f"android-session-{safe_uin}-{timestamp}.json"
+    suffix = 1
+    while destination.exists():
+        destination = ANDROID_SESSION_EXPORT_DIR / (
+            f"android-session-{safe_uin}-{timestamp}-{suffix}.json"
+        )
+        suffix += 1
+    return destination
+def console_process_spec(
+    frozen: bool | None = None, profile: str = ""
+) -> tuple[list[str], dict[str, str]]:
     """Return an independent console command and environment for this build."""
     is_frozen = getattr(sys, "frozen", False) if frozen is None else frozen
     command = [sys.executable, str(ROOT / "main.py")]
     child_env = os.environ.copy()
+    if profile:
+        child_env["QQPET_PROFILE"] = profile
     if is_frozen:
         command = [sys.executable, "--console"]
         # A one-file PyInstaller child must unpack independently. Otherwise it
@@ -177,6 +201,12 @@ class Launcher(tk.Tk):
             command=self.import_mobile_session,
         )
         self.import_session_button.pack(fill=tk.X, pady=(10, 0))
+        self.export_session_button = ttk.Button(
+            body,
+            text="一键导出 Android 会话",
+            command=self.export_mobile_session,
+        )
+        self.export_session_button.pack(fill=tk.X, pady=(10, 0))
         self.update_button = ttk.Button(
             body,
             text=f"检查更新（当前 v{__version__}）",
@@ -198,6 +228,7 @@ class Launcher(tk.Tk):
         self.connect_button.configure(state=tk.DISABLED)
         self.install_button.configure(state=tk.DISABLED)
         self.import_session_button.configure(state=tk.DISABLED)
+        self.export_session_button.configure(state=tk.DISABLED)
         threading.Thread(target=target, daemon=True).start()
 
     def _browse_adb(self) -> None:
@@ -222,6 +253,7 @@ class Launcher(tk.Tk):
         try:
             uin = import_android_session(selected, default_vault())
             self.connection_mode_var.set("纯电脑手机协议（2.0）")
+            self.store = ConfigStore(config_path("standalone"))
             config = self.store.data
             config["connection"]["mode"] = "standalone_mobile"
             config["account"]["uin"] = uin
@@ -234,10 +266,29 @@ class Launcher(tk.Tk):
         except Exception as exc:
             messagebox.showerror("无法导入 Android 会话", str(exc))
 
+    def export_mobile_session(self) -> None:
+        try:
+            destination = automatic_android_session_export_path("unknown")
+            uin = export_android_session(destination, default_vault())
+            if destination.name.startswith("android-session-unknown-"):
+                final_destination = automatic_android_session_export_path(uin)
+                destination.replace(final_destination)
+                destination = final_destination
+            self._append(f"当前 Android 会话已自动导出到：{destination}")
+            messagebox.showinfo(
+                "导出完成",
+                f"已导出 QQ {uin} 的 Android 会话。\n\n文件位置：\n{destination}",
+            )
+        except Exception as exc:
+            messagebox.showerror("无法导出 Android 会话", str(exc))
+
     def _save_connection_fields(self) -> bool:
         try:
             label = self.connection_mode_var.get().strip()
             mode = CONNECTION_MODE_LABELS.get(label, label)
+            self.store = ConfigStore(
+                config_path("standalone" if mode == "standalone_mobile" else "legacy")
+            )
             if mode == "legacy_mobile_bridge":
                 save_manual_connection(
                     self.store, self.adb_path_var.get(), self.adb_serial_var.get()
@@ -444,6 +495,7 @@ class Launcher(tk.Tk):
         self.connect_button.configure(state=tk.NORMAL)
         self.install_button.configure(state=tk.NORMAL)
         self.import_session_button.configure(state=tk.NORMAL)
+        self.export_session_button.configure(state=tk.NORMAL)
 
     def _drain(self) -> None:
         try:
@@ -461,7 +513,13 @@ class Launcher(tk.Tk):
                 elif kind == "launch":
                     self.state_var.set("连接成功，正在打开控制台……")
                     self.progress.stop()
-                    command, child_env = console_process_spec()
+                    profile = (
+                        "standalone"
+                        if self.store.data.get("connection", {}).get("mode")
+                        == "standalone_mobile"
+                        else "legacy"
+                    )
+                    command, child_env = console_process_spec(profile=profile)
                     subprocess.Popen(command, cwd=ROOT, env=child_env)
                     self.after(300, self.destroy)
                 elif kind == "retry":

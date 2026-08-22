@@ -99,6 +99,13 @@ def sanitize_android_session(value: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
+def import_android_session_data(value: dict[str, Any], vault: WindowsSessionVault) -> str:
+    """Validate and persist an already-authorized session from a local API."""
+    session = sanitize_android_session(value)
+    vault.save(session)
+    return str(session["uin"])
+
+
 def import_android_session(source: str | Path, vault: WindowsSessionVault) -> str:
     try:
         value = json.loads(Path(source).read_text(encoding="utf-8"))
@@ -106,6 +113,20 @@ def import_android_session(source: str | Path, vault: WindowsSessionVault) -> st
         raise AcidifyHostError("无法读取 Android 会话 JSON") from exc
     session = sanitize_android_session(value)
     vault.save(session)
+    return str(session["uin"])
+
+
+def export_android_session(destination: str | Path, vault: WindowsSessionVault) -> str:
+    session = vault.load()
+    if session is None:
+        raise AcidifyHostError("当前没有可导出的 Android 会话")
+    session = sanitize_android_session(session)
+    path = Path(destination)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(session, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
     return str(session["uin"])
 
 
@@ -457,6 +478,21 @@ class AcidifyProtocolService:
             bridge.close()
         self.vault.clear()
 
+    def import_session(self, value: dict[str, Any]) -> str:
+        """Replace the cached session and rebuild the Android transport."""
+        with self._lock:
+            bridge = self._bridge
+            self._bridge = None
+            self._state = "needs_session_import"
+            self._uin = ""
+            self._last_error = ""
+            self._last_transition_at = _utc_now()
+        if bridge is not None:
+            bridge.close()
+        uin = import_android_session_data(value, self.vault)
+        self.start()
+        return uin
+
     def close(self) -> None:
         """Stop the runtime while preserving the DPAPI-encrypted fast-login session."""
         with self._lock:
@@ -481,6 +517,8 @@ def _handler(service: AcidifyProtocolService):
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:17891")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -505,6 +543,13 @@ def _handler(service: AcidifyProtocolService):
             except Exception as exc:
                 self._json(409, {"ok": False, "code": "request_failed", "message": str(exc)})
 
+        def do_OPTIONS(self) -> None:  # noqa: N802
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:17891")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+
         def do_POST(self) -> None:  # noqa: N802
             try:
                 payload = self._body()
@@ -517,6 +562,12 @@ def _handler(service: AcidifyProtocolService):
                 elif self.path == "/v1/session/reconnect":
                     service.reconnect()
                     self._json(202, {"ok": True, "session_state": service.health()["session_state"]})
+                elif self.path == "/v1/session/import":
+                    session = payload.get("session")
+                    if not isinstance(session, dict):
+                        raise AcidifyHostError("请求缺少 session 对象")
+                    uin = service.import_session(session)
+                    self._json(202, {"ok": True, "uin": uin, "session_state": service.health()["session_state"]})
                 elif self.path == "/v1/login/qr":
                     self._json(501, {"ok": False, "code": "qr_unavailable", "message": "Android 后端不支持二维码登录，请导入已授权会话"})
                 else:
@@ -535,6 +586,7 @@ def default_vault() -> WindowsSessionVault:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="QQ 宠物纯电脑 Android 协议服务")
     parser.add_argument("--import-session", metavar="FILE")
+    parser.add_argument("--export-session", metavar="FILE")
     parser.add_argument("--listen", default="127.0.0.1:17890")
     parser.add_argument("--node", default="")
     parser.add_argument("--sign-url", default=os.environ.get("QQPET_ANDROID_SIGN_URL", ""))
@@ -544,6 +596,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.import_session:
         uin = import_android_session(args.import_session, vault)
         print(f"Android 会话已加密保存：QQ {uin}")
+        return 0
+    if args.export_session:
+        uin = export_android_session(args.export_session, vault)
+        print(f"Android 会话已导出：QQ {uin}")
         return 0
     host, separator, port_text = args.listen.rpartition(":")
     if not separator or host not in {"127.0.0.1", "localhost", "::1"}:

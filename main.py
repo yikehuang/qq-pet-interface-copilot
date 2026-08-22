@@ -29,6 +29,7 @@ from qqpet_app.friend_visits import (
 from qqpet_app.friend_pet_cache import load_latest_friend_pet_capture
 from qqpet_app.interface_tests import InterfaceTestResult, InterfaceTestRunner
 from qqpet_app.notifications import NotificationManager
+from qqpet_app.paths import config_path, friend_visit_dir, log_dir, progress_path
 from qqpet_app.scheduler import Scheduler
 from qqpet_app.updater import (
     UpdateInfo,
@@ -46,10 +47,10 @@ ROOT = (
     if getattr(sys, "frozen", False)
     else Path(__file__).resolve().parent
 )
-CONFIG_PATH = ROOT / "config.yaml"
-PROGRESS_PATH = ROOT / "runs" / "daily_progress.json"
-LOG_DIR = ROOT / "runs" / "logs"
-FRIEND_VISIT_DIR = ROOT / "runs"
+CONFIG_PATH = config_path()
+PROGRESS_PATH = progress_path()
+LOG_DIR = log_dir()
+FRIEND_VISIT_DIR = friend_visit_dir()
 
 
 SETTING_FIELDS = [

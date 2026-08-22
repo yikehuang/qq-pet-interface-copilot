@@ -36,6 +36,11 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "格式不正确"):
             launcher.save_manual_connection(Store(), "", "127.0.0.1")
 
+    def test_automatic_session_export_path_is_in_downloads_and_unique(self) -> None:
+        first = launcher.automatic_android_session_export_path("QQ-2360091679", now=0)
+        self.assertIn("android-sessions", str(first))
+        self.assertTrue(first.name.startswith("android-session-2360091679-"))
+
     def test_frozen_console_child_uses_independent_pyinstaller_environment(self) -> None:
         command, environment = launcher.console_process_spec(frozen=True)
         self.assertEqual(command, [launcher.sys.executable, "--console"])
@@ -48,6 +53,11 @@ class LauncherTests(unittest.TestCase):
             environment.get("PYINSTALLER_RESET_ENVIRONMENT"),
             launcher.os.environ.get("PYINSTALLER_RESET_ENVIRONMENT"),
         )
+
+    def test_console_child_can_carry_profile_selection(self) -> None:
+        command, environment = launcher.console_process_spec(frozen=False, profile="standalone")
+        self.assertEqual(command, [launcher.sys.executable, str(launcher.ROOT / "main.py")])
+        self.assertEqual(environment.get("QQPET_PROFILE"), "standalone")
 
     def test_source_acidify_host_uses_python_module(self) -> None:
         command, environment = launcher.acidify_host_process_spec(frozen=False)

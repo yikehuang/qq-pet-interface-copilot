@@ -11,6 +11,7 @@ from qqpet_app.acidify_host import (
     AcidifyHostError,
     AcidifyProtocolService,
     external_api_security,
+    export_android_session,
     import_android_session,
     sanitize_android_session,
 )
@@ -87,6 +88,16 @@ class AcidifyHostTests(unittest.TestCase):
             self.assertEqual(import_android_session(source, vault), "123456789")
         self.assertNotIn("unexpected", vault.value)
         self.assertEqual(vault.value["password"], "")
+
+    def test_export_writes_sanitized_session_json(self) -> None:
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / "exported-session.json"
+            vault = MemoryVault(valid_session())
+            self.assertEqual(export_android_session(output, vault), "123456789")
+            exported = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(exported["uin"], 123456789)
+        self.assertEqual(exported["password"], "")
+        self.assertNotIn("unexpected", exported)
 
     def test_service_blocks_writes_until_explicitly_enabled(self) -> None:
         service = AcidifyProtocolService(Path("."), MemoryVault(valid_session()))
