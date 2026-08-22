@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import math
 import random
+import re
 import threading
 import time
 from datetime import datetime
@@ -61,6 +62,7 @@ class Scheduler:
         self.status_callback = status_callback
         self.activity_callback = activity_callback
         self.client_factory = client_factory or self._make_client
+        self._uses_default_client_factory = client_factory is None
         self._stop = threading.Event()
         self._pk_candidate_cache: tuple[PKOpponent, ...] = ()
         self._pk_candidate_cache_until = 0.0
@@ -487,8 +489,11 @@ class Scheduler:
         counts = self.progress.snapshot()["counts"]
         adventure = config["adventure"]
         due = now.strftime("%H:%M") >= adventure["start_time"]
-        adventure_limit = int(adventure["times_per_day"])
-        if adventure["enabled"] and due and (adventure_limit == 0 or counts["adventure"] < adventure_limit):
+        adventure_limited = bool(adventure.get("limit_enabled", False))
+        adventure_limit = int(adventure.get("times_per_day", 0))
+        if adventure["enabled"] and due and (
+            not adventure_limited or counts["adventure"] < adventure_limit
+        ):
             return "adventure"
 
         if values.gold >= float(config["scheduler"]["coin_threshold"]):
@@ -612,6 +617,13 @@ class Scheduler:
             self.activity("服务器仍返回上次任务，等待当前任务结果")
             story = StoryStatus()
         if story.story_id:
+            if (
+                pending
+                and pending.get("kind") == "adventure"
+                and not story.finished
+                and self._recall_lower_reward_adventure(client, config, story, pending)
+            ):
+                return True
             if story.recallable and not pending:
                 mode = str(config["story"].get("employed_recall_mode", "best_split"))
                 progress = (
@@ -661,6 +673,23 @@ class Scheduler:
                     return True
                 settled = self._settle_and_verify(client, config, story)
                 if settled and pending:
+                    if pending["kind"] == "adventure":
+                        before_gold = float(pending.get("gold_before", 0) or 0)
+                        adventure_name = str(pending.get("activity_name", ""))
+                        if before_gold > 0 and adventure_name:
+                            try:
+                                after_gold = float(client.query_values().gold)
+                                earned = max(0.0, after_gold - before_gold)
+                                if earned > 0:
+                                    self.progress.record_adventure_reward(
+                                        adventure_name, earned
+                                    )
+                                    self.log(
+                                        f"冒险收益已由结算前后金币验证：“{adventure_name}” "
+                                        f"+{earned:g} 金币，已更新自动选择样本"
+                                    )
+                            except QQPetError as exc:
+                                self.log(f"冒险金币样本暂未记录：{exc}")
                     if pending["kind"] in {"school", "work"}:
                         minutes = max(1, (int(story.duration_seconds) + 59) // 60)
                         active = self.progress.record_activity_minutes(
@@ -700,6 +729,83 @@ class Scheduler:
                 self.log(f"等待服务器确认 {pending['kind']} 启动（{age:.0f}s）")
             return True
         return False
+
+    @staticmethod
+    def _adventure_reward_from_text(text: str) -> float:
+        value = str(text or "")
+        patterns = (
+            r"金币\s*[+＋]?\s*(\d+(?:\.\d+)?)",
+            r"(\d+(?:\.\d+)?)\s*(?:个)?金币",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, value)
+            if match:
+                return float(match.group(1))
+        return 0.0
+
+    def _adventure_score(self, option) -> tuple[float, str]:
+        server_gold = self._adventure_reward_from_text(option.reward)
+        if server_gold > 0:
+            return server_gold, "服务器目录"
+        observed = self.progress.adventure_reward_observations().get(option.name, {})
+        average = float(observed.get("average_gold", 0) or 0)
+        return (average, "真实结算均值") if average > 0 else (0.0, "待采样")
+
+    def _best_adventure_option(self, options):
+        available = [option for option in options if option.can_do and option.name]
+        if not available:
+            raise QQPetError("服务器当前没有可执行的冒险")
+        ranked = [(self._adventure_score(option), index, option) for index, option in enumerate(available)]
+        best_score, _index, best = max(
+            ranked, key=lambda row: (row[0][0], -row[1])
+        )
+        return best, best_score[0], best_score[1]
+
+    def _recall_lower_reward_adventure(
+        self, client: NapCatClient, config: dict, story: StoryStatus, pending: dict
+    ) -> bool:
+        adventure = config["adventure"]
+        if not bool(adventure.get("maximize_gold", True)) or not bool(
+            adventure.get("recall_lower_reward", True)
+        ):
+            return False
+        current_name = str(pending.get("activity_name", ""))
+        if not current_name:
+            return False
+        try:
+            best, best_gold, source = self._best_adventure_option(
+                client.query_adventure_options()
+            )
+        except QQPetError as exc:
+            self.log(f"冒险收益复查暂不可用：{exc}")
+            return False
+        current_gold = float(pending.get("reward_gold", 0) or 0)
+        if current_gold <= 0:
+            current_gold = float(
+                self.progress.adventure_reward_observations()
+                .get(current_name, {})
+                .get("average_gold", 0)
+                or 0
+            )
+        if best.name == current_name or best_gold <= current_gold or best_gold <= 0:
+            return False
+        if not story.recallable:
+            self.log(
+                f"发现更高金币冒险“{best.name}”（{best_gold:g}，{source}），"
+                f"当前“{current_name}”为 {current_gold:g}，但服务器标记不可召回"
+            )
+            return False
+        if self._safe_or_blocked(config, "召回低收益冒险"):
+            return False
+        if not self._settle_and_verify(client, config, story):
+            return True
+        self.progress.clear_pending()
+        self.log(
+            f"当前冒险“{current_name}”收益 {current_gold:g} 低于“{best.name}”"
+            f" {best_gold:g}（{source}），已召回；下一轮改发最高金币冒险"
+        )
+        self.activity(f"低收益冒险已召回，准备改为：{best.name}")
+        return True
 
     def _settle_and_verify(
         self, client: NapCatClient, config: dict, story: StoryStatus
@@ -949,16 +1055,37 @@ class Scheduler:
                             current.hunger, hunger_threshold, feed_restore
                         ),
                     )
+                    try:
+                        food_id, food_name, available = self._friend_feed_supply(
+                            client, config, batch_count
+                        )
+                    except Exception as exc:
+                        self.progress.set_care_block(
+                            feed_block_key, f"好友投喂备货失败：{exc}", cooldown
+                        )
+                        self.log(
+                            f"好友自动喂食备货失败：{name}（QQ {uin}）：{exc}"
+                        )
+                        return "friend_feed_supply_failed"
+                    batch_count = min(batch_count, available)
+                    if batch_count <= 0:
+                        self.progress.set_care_block(
+                            feed_block_key, "好友投喂停止：没有可用食物", cooldown
+                        )
+                        self.log(
+                            f"好友自动喂食已停止：{name}（QQ {uin}）没有可用食物"
+                        )
+                        return "friend_feed_unavailable"
                     self.activity(
                         f"好友 {name} 饥饿度 {current.hunger:.1f}，"
-                        f"正在一次投喂 {batch_count} 份"
+                        f"正在一次投喂 {batch_count} 份{food_name}"
                     )
                     if self._safe_or_blocked(config, f"给好友 {name} 喂食"):
                         return "friend_feed_blocked"
                     try:
                         # 喂食无已验证数量字段，因此同批连续发送，批次结束后只刷新一次。
                         for _ in range(batch_count):
-                            friend_client.feed()
+                            friend_client.feed(food_id) if food_id else friend_client.feed()
                     except Exception as exc:
                         detail = str(exc)
                         if "金币" in detail and any(
@@ -1048,18 +1175,24 @@ class Scheduler:
                 1,
                 min(20, int(care.get("max_washes_per_friend_per_check", 10))),
             )
-            bath_choice = str(care.get("bath_item", "soap"))
-            bath_item_id = "2" if bath_choice == "bath_ball" else "1"
-            bath_item_name = "沐浴球" if bath_choice == "bath_ball" else "香皂片"
             washes_this_check = 0
             while current.clean < clean_threshold and washes_this_check < max_washes:
-                bath_restore = self._supply_restore(
-                    "bath", float(config["optimization"].get("soap_restore", 10))
-                )
-                batch_count = min(
-                    max_washes - washes_this_check,
-                    self._needed_supply_count(current.clean, clean_threshold, bath_restore),
-                )
+                try:
+                    bath_item_id, bath_item_name, batch_count = self._friend_bath_supply(
+                        client,
+                        config,
+                        current.clean,
+                        clean_threshold,
+                        max_washes - washes_this_check,
+                    )
+                except Exception as exc:
+                    self.progress.set_care_block(
+                        wash_block_key, f"好友清洁备货失败：{exc}", cooldown
+                    )
+                    self.log(
+                        f"好友自动清洁备货失败：{name}（QQ {uin}）：{exc}"
+                    )
+                    return "friend_wash_supply_failed"
                 self.activity(
                     f"好友 {name} 清洁 {current.clean:.1f}，正在一次使用 "
                     f"{batch_count} 个{bath_item_name}清洁"
@@ -1137,6 +1270,147 @@ class Scheduler:
                 f"当前清洁 {current.clean:.1f}，{int(cooldown)} 秒后重新检查"
             )
             return "friend_wash_partial"
+
+    def _friend_bath_supply(
+        self,
+        client: NapCatClient,
+        config: dict,
+        current_clean: float,
+        clean_threshold: float,
+        maximum: int,
+    ) -> tuple[str, str, int]:
+        """Select/buy wash items; only refreshed friend clean verifies success."""
+        care = config["friend_care"]
+        choice = str(care.get("bath_item", "auto"))
+        fallback_id = "2" if choice == "bath_ball" else "1"
+        fallback_name = "沐浴球" if fallback_id == "2" else "香皂片"
+        if not hasattr(client, "query_bath_inventory"):
+            restore = self._supply_restore(
+                "bath", float(config["optimization"].get("soap_restore", 10))
+            )
+            return fallback_id, fallback_name, min(
+                maximum,
+                self._needed_supply_count(current_clean, clean_threshold, restore),
+            )
+
+        catalog = {
+            str(item.item_id): item
+            for item in (
+                client.query_bath_items()
+                if hasattr(client, "query_bath_items")
+                else ()
+            )
+        }
+
+        def read_counts() -> dict[str, int]:
+            inventory = client.query_bath_inventory()
+            return {"1": int(inventory.count("1")), "2": int(inventory.count("2"))}
+
+        counts = read_counts()
+        candidates = ["2", "1"] if choice == "auto" else [fallback_id]
+        selected_id = next((item_id for item_id in candidates if counts[item_id] > 0), "")
+        if not selected_id:
+            if not bool(care.get("auto_buy_supplies", True)):
+                raise QQPetError("洗护用品库存不足，好友洗护自动购买未开启")
+            selected_id = "2" if choice == "auto" else fallback_id
+            item = catalog.get(selected_id)
+            restore = float(getattr(item, "clean_gain", 0) or 0) or 10.0
+            needed = self._needed_supply_count(current_clean, clean_threshold, restore)
+            buy_count = min(
+                99, max(needed, int(care.get("bath_purchase_count", 10)))
+            )
+            before = counts[selected_id]
+            purchase = client.buy_bath_item(selected_id, buy_count)
+            counts = read_counts()
+            if not bool(getattr(purchase, "succeeded", False)) and counts[selected_id] <= before:
+                raise QQPetError("金币购买洗护用品未到账")
+            self.log(
+                f"好友清洁备货：已购买 {buy_count} 个"
+                f"{'沐浴球' if selected_id == '2' else '香皂片'}，"
+                f"当前库存 {counts[selected_id]}"
+            )
+
+        item = catalog.get(selected_id)
+        item_name = str(getattr(item, "name", "")) or (
+            "沐浴球" if selected_id == "2" else "香皂片"
+        )
+        restore = float(getattr(item, "clean_gain", 0) or 0)
+        if restore <= 0:
+            restore = 20.0 if selected_id == "2" else self._supply_restore(
+                "bath", float(config["optimization"].get("soap_restore", 10))
+            )
+        count = min(
+            maximum,
+            counts[selected_id],
+            self._needed_supply_count(current_clean, clean_threshold, restore),
+        )
+        if count <= 0:
+            raise QQPetError(f"{item_name}库存不足")
+        if item is not None:
+            self.progress.record_supply_observation(
+                "bath",
+                price=float(getattr(item, "gold_price", 0) or 0),
+                restore=restore,
+            )
+        return selected_id, item_name, count
+
+    def _friend_feed_supply(
+        self, client: NapCatClient, config: dict, needed: int
+    ) -> tuple[str, str, int]:
+        """Select real owner inventory for friend feeding; never verifies success by it."""
+        # Small unit-test clients and older third-party transports may not expose
+        # the inventory catalog. Keep their legacy default path, while the real
+        # mobile client always takes the verified inventory branch below.
+        if not hasattr(client, "query_food_inventory"):
+            return "", "饼干", max(1, int(needed))
+
+        care = config["friend_care"]
+        choice = str(care.get("food_item", "auto"))
+
+        def read_stock() -> tuple[int, object | None]:
+            inventory = client.query_food_inventory()
+            items = client.query_food_items() if hasattr(client, "query_food_items") else ()
+            shrimp = next(
+                (
+                    item for item in items
+                    if str(getattr(item, "food_id", "")) == "3"
+                    or "虾仁" in str(getattr(item, "name", ""))
+                ),
+                None,
+            )
+            return int(inventory.biscuits), shrimp
+
+        biscuits, shrimp = read_stock()
+        shrimp_count = int(getattr(shrimp, "balance", 0)) if shrimp is not None else 0
+        shrimp_id = str(getattr(shrimp, "food_id", "")) if shrimp is not None else ""
+
+        # Auto mode consumes existing shrimp first, avoiding an unnecessary gold
+        # purchase. A requested fixed item remains fixed and never silently changes.
+        if choice in {"auto", "shrimp"} and shrimp_id and shrimp_count > 0:
+            return shrimp_id, "虾仁", min(int(needed), shrimp_count)
+        if choice in {"auto", "biscuit"} and biscuits > 0:
+            return "", "饼干", min(int(needed), biscuits)
+
+        if choice == "shrimp":
+            raise QQPetError("虾仁库存不足，且虾仁暂无已验证金币购买接口")
+        if not bool(care.get("auto_buy_supplies", True)):
+            raise QQPetError("饼干库存不足，好友食物自动购买未开启")
+
+        buy_count = min(99, max(
+            int(needed), int(care.get("food_purchase_count", 10))
+        ))
+        before = biscuits
+        purchase = client.buy_food(buy_count)
+        biscuits, _shrimp = read_stock()
+        if int(getattr(purchase, "bought", 0)) <= 0 and biscuits <= before:
+            raise QQPetError("金币购买饼干未到账")
+        self.log(
+            f"好友喂食备货：已购买 {int(getattr(purchase, 'bought', 0)) or buy_count} 个饼干，"
+            f"当前饼干 {biscuits}"
+        )
+        if biscuits <= 0:
+            raise QQPetError("购买后饼干库存仍为 0")
+        return "", "饼干", min(int(needed), biscuits)
         return None
 
     def run_once(self) -> str | None:
@@ -1266,7 +1540,9 @@ class Scheduler:
                     else:
                         self.activity("正在购买本轮所需食物")
                         shortage = max(0, use_count - food_count)
-                        buy_count = max(shortage, int(care["food_purchase_count"]))
+                        buy_count = min(
+                            99, max(shortage, int(care["food_purchase_count"]))
+                        )
                         before_count = inventory.biscuits
                         purchase = client.buy_food(buy_count)
                         inventory = client.query_food_inventory()
@@ -1380,7 +1656,9 @@ class Scheduler:
                     else:
                         self.activity("正在购买本轮所需洗护用品")
                         shortage = max(0, use_count - bath_count)
-                        buy_count = max(shortage, int(care["soap_purchase_count"]))
+                        buy_count = min(
+                            99, max(shortage, int(care["soap_purchase_count"]))
+                        )
                         purchase = client.buy_bath_item(bath_item_id, buy_count)
                         after_purchase = client.query_bath_inventory()
                         if (
@@ -1697,22 +1975,50 @@ class Scheduler:
         if action == "adventure":
             self.activity("正在获取服务器冒险选项")
             preferred_name = str(config["adventure"].get("option_name", ""))
+            selected_name = preferred_name
+            selected_gold = 0.0
+            selected_source = "用户指定"
+            if bool(config["adventure"].get("maximize_gold", True)):
+                best, selected_gold, selected_source = self._best_adventure_option(
+                    client.query_adventure_options()
+                )
+                selected_name = best.name
             try:
-                result = client.start_adventure(preferred_name)
+                result = client.start_adventure(selected_name)
             except (QQPetEmptyResponse, QQPetConnectionError) as exc:
                 if exc.command_name != "OidbSvcTrpcTcp.0x975e_1":
                     raise
-                self.progress.set_pending("adventure")
+                self.progress.set_pending(
+                    "adventure",
+                    activity_name=selected_name,
+                    reward_gold=selected_gold,
+                    reward_source=selected_source,
+                    gold_before=values.gold,
+                )
                 self.log(
                     "冒险请求返回空响应，发送结果暂不确定；已进入待确认状态，"
                     "后续只查询服务器任务状态，不会重复开始冒险"
                 )
                 self.activity("冒险结果待确认，正在等待服务器状态")
                 return action
-            self.progress.set_pending("adventure")
             option = result.option
+            if selected_gold <= 0:
+                selected_gold, selected_source = self._adventure_score(option)
+            self.progress.set_pending(
+                "adventure",
+                activity_name=option.name,
+                reward_gold=selected_gold,
+                reward_source=selected_source,
+                gold_before=values.gold,
+            )
             response_story = f"，storyId={result.story_id}" if result.story_id else ""
-            selection = "指定" if preferred_name else "服务器当前可用"
+            selection = (
+                f"金币最高（{selected_source} {selected_gold:g}）"
+                if bool(config["adventure"].get("maximize_gold", True)) and selected_gold > 0
+                else "待采样的服务器当前可用"
+                if bool(config["adventure"].get("maximize_gold", True))
+                else "指定" if preferred_name else "服务器当前可用"
+            )
             friend_text = "，已雇佣好友" if result.hired_friend else ""
             reward_text = f"，奖励 {option.reward}" if option.reward else ""
             self.log(
@@ -1753,8 +2059,15 @@ class Scheduler:
 
     def run_forever(self) -> None:
         self._stop.clear()
+        cleared_supply_blocks = self.progress.clear_retryable_supply_blocks()
         self.activity("自动控制已启动，正在检查")
         self.log("接口调度器已启动")
+        if cleared_supply_blocks:
+            self.log(
+                f"启动时已清除 {cleared_supply_blocks} 条旧的补给失败冷却，"
+                "将按当前库存和购买配置重新判断"
+            )
+        self._prepare_persistent_mobile_bridge()
         while not self._stop.is_set():
             try:
                 self.run_once()
@@ -1780,6 +2093,33 @@ class Scheduler:
             self._stop.wait(interval)
         self.activity("自动控制已停止")
         self.log("接口调度器已停止")
+
+    def _prepare_persistent_mobile_bridge(self) -> None:
+        """Prepare and attach once; subsequent clients reuse the cached reader."""
+        if not self._uses_default_client_factory:
+            return
+        config = self.config_store.data
+        mode = str((config.get("connection") or {}).get("mode") or "legacy_mobile_bridge")
+        mobile = config.get("mobile_protocol") or {}
+        if mode != "legacy_mobile_bridge" or not bool(mobile.get("persistent_connection", True)):
+            return
+        reader = reader_from_config(config)
+        if reader is None:
+            return
+        try:
+            if bool(mobile.get("prepare_on_scheduler_start", True)):
+                download_dir = Path(__file__).resolve().parent.parent / "tools" / "mobile-protocol"
+                reader.prepare_runtime(download_dir, self.log)
+            status = reader.ensure_persistent_connection()
+            self.log(
+                "手机协议已完成单次 Hook 并保持复用："
+                f"QQ PID {status['pid']}，连接序号 {status['attach_count']}，"
+                f"重连 {status['reconnect_count']} 次"
+            )
+            self.activity("手机协议已连接，后续任务复用当前 Hook")
+        except Exception as exc:
+            # Keep the scheduler alive so its normal reconnect loop can recover.
+            self.log(f"手机协议预连接未完成：{exc}；将由调度器继续重试")
 
     def _reconnect_until_ready(self) -> bool:
         """Probe the stateless OneBot HTTP endpoint without replaying a pet action."""

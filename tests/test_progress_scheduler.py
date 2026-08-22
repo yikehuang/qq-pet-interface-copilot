@@ -12,6 +12,7 @@ from qqpet_app.client import (
     AdventureOption,
     AdventureStartResult,
     BathInventory,
+    BathItem,
     EncourageResult,
     FoodInventory,
     FoodItem,
@@ -260,6 +261,47 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(own_client.targets, [("10001", "friend-pet")] * 2)
             self.assertEqual(scheduler.progress.count("friend_feed"), 3)
 
+    def test_friend_care_uses_available_shrimp_when_biscuits_are_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = self._friend_care_config(
+                root, hunger_threshold=90, verify_attempts=1
+            )
+
+            class FriendClient:
+                def __init__(self):
+                    self.food_ids = []
+
+                def feed(self, food_id=""):
+                    self.food_ids.append(food_id)
+
+            friend_client = FriendClient()
+
+            class OwnClient:
+                def query_friend_pet_values(self, _uin, _pet_id):
+                    return PetValues(hunger=70 + len(friend_client.food_ids) * 10)
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=0, shrimp=11)
+
+                def query_food_items(self):
+                    return (FoodItem("3", "虾仁", 11),)
+
+                def buy_food(self, _count):
+                    raise AssertionError("已有虾仁时不应购买饼干")
+
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: friend_client,
+            )
+            self.assertEqual(
+                scheduler._run_friend_care_if_due(OwnClient(), config),
+                "friend_feed",
+            )
+            self.assertEqual(friend_client.food_ids, ["3", "3"])
+            self.assertEqual(scheduler.progress.count("friend_feed"), 2)
+
     def test_friend_care_does_not_feed_friend_at_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -290,7 +332,12 @@ class ProgressAndSchedulerTests(unittest.TestCase):
                     return PetValues(hunger=50)
 
                 def query_food_inventory(self):
-                    raise AssertionError("不能使用食物库存判定好友喂食")
+                    # Inventory may select a usable supply, but must never be
+                    # accepted as proof that the friend's hunger increased.
+                    return FoodInventory(biscuits=10, shrimp=0)
+
+                def query_food_items(self):
+                    return ()
 
             class FriendClient:
                 def __init__(self):
@@ -346,7 +393,12 @@ class ProgressAndSchedulerTests(unittest.TestCase):
                     )
 
                 def query_bath_inventory(self):
-                    raise AssertionError("不能使用洗护库存判定好友清洁")
+                    # Inventory selects a usable item; refreshed friend clean
+                    # remains the only success proof.
+                    return BathInventory((("1", 0), ("2", 2)))
+
+                def query_bath_items(self):
+                    return (BathItem("2", "沐浴球", 12, 10, 0),)
 
             own_client = OwnClient()
             scheduler = Scheduler(
@@ -363,6 +415,71 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             )
             self.assertEqual(own_client.reads, 2)
             self.assertEqual(scheduler.progress.count("friend_wash"), 2)
+
+    def test_friend_care_auto_uses_existing_bath_ball_when_soap_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = self._friend_care_config(
+                root,
+                feed_enabled=False,
+                clean_enabled=True,
+                clean_threshold=90,
+                bath_item="auto",
+                verify_attempts=1,
+            )
+
+            class FriendClient:
+                calls = []
+
+                def use_bath_item(self, item_id, pet_uin="", count=1):
+                    self.calls.append((item_id, pet_uin, count))
+
+            friend_client = FriendClient()
+
+            class OwnClient:
+                def query_friend_pet_values(self, _uin, _pet_id):
+                    return PetValues(
+                        hunger=100,
+                        clean=75 + sum(call[2] for call in friend_client.calls) * 20,
+                    )
+
+                def query_bath_inventory(self):
+                    return BathInventory((("1", 0), ("2", 7)))
+
+                def query_bath_items(self):
+                    return (BathItem("2", "沐浴球", 12, 20, 0),)
+
+                def buy_bath_item(self, _item_id, _count):
+                    raise AssertionError("已有沐浴球时不应购买")
+
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: friend_client,
+            )
+            self.assertEqual(
+                scheduler._run_friend_care_if_due(OwnClient(), config),
+                "friend_wash",
+            )
+            self.assertEqual(friend_client.calls, [("2", "10001", 1)])
+            self.assertEqual(scheduler.progress.count("friend_wash"), 1)
+
+    def test_legacy_purchase_count_is_clamped_and_supply_block_clears_on_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / "config.yaml"
+            legacy = copy.deepcopy(DEFAULT_CONFIG)
+            legacy["account"]["pet_id"] = "pet"
+            legacy["care"]["soap_purchase_count"] = 1000
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            self.assertEqual(ConfigStore(path).data["care"]["soap_purchase_count"], 99)
+
+            progress = DailyProgress(root / "progress.json")
+            progress.set_care_block("wash", "洗护用品不足", 3600)
+            progress.set_care_block("settle:story", "结算待确认", 3600)
+            self.assertEqual(progress.clear_retryable_supply_blocks(), 1)
+            self.assertIsNone(progress.active_care_block("wash"))
+            self.assertIsNotNone(progress.active_care_block("settle:story"))
 
     def test_friend_care_does_not_count_stale_clean_profile(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -1069,7 +1186,7 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             scheduler.progress.increment("work")
             self.assertIsNone(scheduler.decide(config, rich, now))
 
-    def test_legacy_work_limit_is_migrated_but_school_stays_unlimited(self) -> None:
+    def test_legacy_work_limit_is_migrated_but_school_and_adventure_stay_unlimited(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "config.yaml"
             legacy = copy.deepcopy(DEFAULT_CONFIG)
@@ -1078,11 +1195,14 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             legacy["school"]["times_per_day"] = 1
             legacy["work"].pop("limit_enabled", None)
             legacy["work"]["times_per_day"] = 3
+            legacy["adventure"].pop("limit_enabled", None)
+            legacy["adventure"]["times_per_day"] = 3
             path.write_text(json.dumps(legacy), encoding="utf-8")
             migrated = ConfigStore(path).data
             self.assertFalse(migrated["school"]["limit_enabled"])
             self.assertTrue(migrated["work"]["limit_enabled"])
             self.assertEqual(migrated["work"]["times_per_day"], 3)
+            self.assertFalse(migrated["adventure"]["limit_enabled"])
 
     def test_adventure_wins_after_configured_time(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -1094,6 +1214,26 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             scheduler = Scheduler(root / "config.yaml", root / "progress.json")
             action = scheduler.decide(config, PetValues(gold=1000), datetime(2026, 8, 2, 9, 0))
             self.assertEqual(action, "adventure")
+
+    def test_adventure_is_unlimited_unless_limit_switch_is_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"]["start_time"] = "00:00"
+            config["adventure"]["limit_enabled"] = False
+            config["adventure"]["times_per_day"] = 3
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            scheduler.progress.increment("adventure", 99)
+            now = datetime(2026, 8, 2, 9, 0)
+
+            self.assertEqual(scheduler.decide(config, PetValues(gold=1000), now), "adventure")
+
+            config["adventure"]["limit_enabled"] = True
+            self.assertNotEqual(
+                scheduler.decide(config, PetValues(gold=1000), now), "adventure"
+            )
 
     def test_story_kind_can_recover_interrupted_work(self) -> None:
         self.assertEqual(Scheduler._story_kind("6400_example"), "work")
@@ -1540,6 +1680,17 @@ class ProgressAndSchedulerTests(unittest.TestCase):
 
                     return FoodInventory(biscuits=12, shrimp=10)
 
+                def query_adventure_options(self):
+                    return (
+                        AdventureOption(
+                            "打招呼",
+                            reward="金币 8",
+                            duration="45秒",
+                            cost="体力5，清洁5",
+                            can_do=True,
+                        ),
+                    )
+
                 def start_adventure(self, preferred_name):
                     self.started = preferred_name
                     return AdventureStartResult(
@@ -1559,10 +1710,64 @@ class ProgressAndSchedulerTests(unittest.TestCase):
                 client_factory=lambda _config: fake,
             )
             self.assertEqual(scheduler.run_once(), "adventure")
-            self.assertEqual(fake.started, "")
+            self.assertEqual(fake.started, "打招呼")
             self.assertEqual(
                 scheduler.progress.snapshot()["pending"]["kind"], "adventure"
             )
+            self.assertEqual(
+                scheduler.progress.snapshot()["pending"]["reward_gold"], 8
+            )
+
+    def test_adventure_selects_highest_known_gold_reward(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            low = AdventureOption("低收益", reward="奖励 5 金币", can_do=True)
+            high = AdventureOption("高收益", reward="金币 +30", can_do=True)
+            unavailable = AdventureOption("不可用", reward="100 金币", can_do=False)
+
+            best, gold, source = scheduler._best_adventure_option(
+                (low, high, unavailable)
+            )
+
+            self.assertEqual(best.name, "高收益")
+            self.assertEqual(gold, 30)
+            self.assertEqual(source, "服务器目录")
+
+    def test_lower_reward_adventure_is_recalled_only_when_server_allows(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            scheduler.progress.set_pending(
+                "adventure", activity_name="低收益", reward_gold=5
+            )
+
+            class FakeClient:
+                settled = []
+
+                def query_adventure_options(self):
+                    return (
+                        AdventureOption("低收益", reward="5金币", can_do=True),
+                        AdventureOption("高收益", reward="20金币", can_do=True),
+                    )
+
+                def settle_story(self, story_id):
+                    self.settled.append(story_id)
+                    return OidbResponse(38752, 1, 0, b"ok", b"raw")
+
+            fake = FakeClient()
+            story = StoryStatus(
+                "6700_low", 101, remaining_seconds=30,
+                duration_seconds=45, recallable=True
+            )
+
+            self.assertTrue(scheduler._handle_story(fake, config, story))
+            self.assertEqual(fake.settled, ["6700_low"])
+            self.assertIsNone(scheduler.progress.snapshot()["pending"])
 
     def test_empty_biscuit_inventory_blocks_tasks_without_feeding(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

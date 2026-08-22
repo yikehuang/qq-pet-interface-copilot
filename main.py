@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -62,6 +63,8 @@ SETTING_FIELDS = [
     ("mobile_protocol.endpoint", "手机协议本机地址", str),
     ("mobile_protocol.adb_serial", "模拟器连接地址", str),
     ("mobile_protocol.adb_path", "ADB 程序路径（留空自动查找）", str),
+    ("mobile_protocol.persistent_connection", "启动时 Hook 一次并保持复用", bool),
+    ("mobile_protocol.prepare_on_scheduler_start", "调度启动时自动准备手机协议环境", bool),
     ("mobile_protocol.auto_reconnect", "手机协议断开后自动重连", bool),
     ("mobile_protocol.reconnect_initial_seconds", "自动重连初始间隔（秒）", float),
     ("mobile_protocol.reconnect_max_seconds", "自动重连最大间隔（秒）", float),
@@ -80,8 +83,11 @@ SETTING_FIELDS = [
     ("work.employ_friend", "启用打工雇佣好友", bool),
     ("work.hire_mode", "雇佣方式", str),
     ("adventure.enabled", "启用冒险", bool),
+    ("adventure.maximize_gold", "自动选择金币收益最高的冒险", bool),
+    ("adventure.recall_lower_reward", "当前冒险收益较低时自动召回", bool),
+    ("adventure.limit_enabled", "限制每日冒险次数（关闭=不限）", bool),
     ("adventure.start_time", "冒险开始时间 HH:MM", str),
-    ("adventure.times_per_day", "每日冒险上限", int),
+    ("adventure.times_per_day", "每日最大冒险次数", int),
     ("pk.enabled", "启用每日定时自动 PK", bool),
     ("pk.start_time", "每日 PK 批次开始时间 HH:MM", str),
     ("pk.max_per_day", "每日 PK 上限（0 不限）", int),
@@ -108,6 +114,10 @@ SETTING_FIELDS = [
     ("friend_care.enabled", "启用好友自动照顾", bool),
     ("friend_care.feed_enabled", "启用好友自动喂食", bool),
     ("friend_care.clean_enabled", "启用好友自动清洁", bool),
+    ("friend_care.food_item", "好友喂食物品", str),
+    ("friend_care.auto_buy_supplies", "好友食物不足时自动购买饼干", bool),
+    ("friend_care.food_purchase_count", "好友喂食每次购买饼干数量", int),
+    ("friend_care.bath_purchase_count", "好友清洁每次购买洗护数量（1-99）", int),
     ("friend_care.check_interval_seconds", "好友照顾检查间隔（秒）", float),
     ("friend_care.hunger_threshold", "好友体力喂食阈值", float),
     ("friend_care.clean_threshold", "好友清洁洗护阈值", float),
@@ -170,7 +180,13 @@ CHOICE_FIELDS = {
         "香皂片": "soap",
         "沐浴球": "bath_ball",
     },
+    "friend_care.food_item": {
+        "自动选择现有食物": "auto",
+        "饼干": "biscuit",
+        "虾仁": "shrimp",
+    },
     "friend_care.bath_item": {
+        "自动选择现有洗护用品": "auto",
         "香皂片": "soap",
         "沐浴球": "bath_ball",
     },
@@ -285,13 +301,19 @@ class MainWindow(tk.Tk):
         )
         self.friend_care_friend_uins: dict[str, str] = {}
         self._notice_windows: list[tk.Toplevel] = []
+        self.main_nav_buttons: dict[str, tk.Button] = {}
+        self.main_nav_active = "dashboard"
         self.status_vars = {
             key: tk.StringVar(value="--")
             for key in (
-                "connection", "gold", "food", "bath", "mood", "hunger",
-                "clean", "story", "counts", "pk", "friend_visits", "friend_care",
+                "connection", "transport", "gold", "food", "bath", "mood", "hunger",
+                "clean", "total", "story", "counts", "pk", "friend_visits", "friend_care",
+                "biscuits", "shrimp", "soap", "bath_ball", "pet_name", "pet_id",
             )
         }
+        self.status_vars["pet_name"].set("我的 QQ 宠物")
+        self.status_vars["pet_id"].set("等待读取宠物资料")
+        self._dashboard_gauges: list[tuple[tk.Canvas, tk.StringVar, str]] = []
         self._build_ui()
         self.bind_all("<MouseWheel>", self._route_mousewheel, add="+")
         self.after_idle(self._maximize_window)
@@ -312,30 +334,30 @@ class MainWindow(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
-        self.configure(background="#f5f3fb")
-        style.configure("TFrame", background="#f5f3fb")
-        style.configure("TLabel", background="#f5f3fb", foreground="#403852")
-        style.configure("TNotebook", background="#f5f3fb", borderwidth=0)
+        self.configure(background="#f4f7fc")
+        style.configure("TFrame", background="#f4f7fc")
+        style.configure("TLabel", background="#f4f7fc", foreground="#2c3a50")
+        style.configure("TNotebook", background="#f4f7fc", borderwidth=0)
         style.configure(
             "TNotebook.Tab",
-            background="#ebe7f4",
-            foreground="#655d73",
+            background="#e9eff8",
+            foreground="#61718c",
             padding=(18, 9),
             font=("Microsoft YaHei UI", 10),
         )
         style.map(
             "TNotebook.Tab",
             background=[("selected", "#ffffff")],
-            foreground=[("selected", "#5d49cb")],
+            foreground=[("selected", "#3d73c9")],
         )
         style.configure(
             "Primary.TButton",
-            background="#6c56dd",
+            background="#5c95e8",
             foreground="#ffffff",
             padding=(12, 8),
             font=("Microsoft YaHei UI", 10, "bold"),
         )
-        style.map("Primary.TButton", background=[("active", "#5b45c8")])
+        style.map("Primary.TButton", background=[("active", "#477fce")])
         style.configure("Card.TFrame", background="#ffffff", relief="flat")
         style.configure("Card.TLabel", background="#ffffff", foreground="#817991")
         style.configure(
@@ -352,11 +374,17 @@ class MainWindow(tk.Tk):
             anchor="w",
             padding=(12, 9),
         )
+        # The referenced Dulu workspace uses a persistent module navigator.
+        # Hide duplicate notebook tabs; every page remains reachable from the rail.
+        try:
+            style.layout("Workspace.TNotebook.Tab", [])
+        except tk.TclError:
+            pass
 
         hero = tk.Frame(
             self,
             background="#ffffff",
-            highlightbackground="#e8e3f1",
+            highlightbackground="#dbe4f1",
             highlightthickness=1,
             padx=18,
             pady=12,
@@ -367,7 +395,7 @@ class MainWindow(tk.Tk):
             text="宠",
             width=3,
             height=1,
-            background="#7059df",
+            background="#5c95e8",
             foreground="#ffffff",
             font=("Microsoft YaHei UI", 20, "bold"),
         )
@@ -378,21 +406,21 @@ class MainWindow(tk.Tk):
             hero_copy,
             text="ONEBOT · QQ PET",
             background="#ffffff",
-            foreground="#887da6",
+            foreground="#8291a8",
             font=("Microsoft YaHei UI", 8, "bold"),
         ).pack(anchor="w")
         tk.Label(
             hero_copy,
             text="QQ 宠物接口助手",
             background="#ffffff",
-            foreground="#302b48",
+            foreground="#25364c",
             font=("Microsoft YaHei UI", 18, "bold"),
         ).pack(anchor="w")
         tk.Label(
             hero_copy,
             text="纯电脑接口托管 · 学习 / 打工 / 冒险 / PK / 好友照顾",
             background="#ffffff",
-            foreground="#817991",
+            foreground="#7d8ca3",
             font=("Microsoft YaHei UI", 9),
         ).pack(anchor="w", pady=(2, 0))
         hero_status = tk.Frame(hero, background="#ffffff")
@@ -411,7 +439,7 @@ class MainWindow(tk.Tk):
             hero_status,
             textvariable=self.status_vars["story"],
             background="#ffffff",
-            foreground="#817991",
+            foreground="#7d8ca3",
             font=("Microsoft YaHei UI", 8),
         ).pack(anchor="e", pady=(6, 0))
 
@@ -421,7 +449,7 @@ class MainWindow(tk.Tk):
         left_canvas = tk.Canvas(
             left_panel,
             highlightthickness=0,
-            width=390,
+            width=320,
             background=style.lookup("TFrame", "background") or self.cget("background"),
         )
         left_scroll = ttk.Scrollbar(
@@ -444,32 +472,24 @@ class MainWindow(tk.Tk):
         )
         self.left_status_canvas = left_canvas
         right = ttk.Frame(shell)
-        shell.add(left_panel, weight=1)
-        shell.add(right, weight=3)
+        shell.add(left_panel, weight=0)
+        shell.add(right, weight=1)
 
-        ttk.Label(left, text="宠物实时状态", style="Title.TLabel").pack(anchor="w", pady=(0, 10))
-        metrics = ttk.Frame(left)
-        metrics.pack(fill=tk.X, pady=(0, 10))
-        metrics.columnconfigure((0, 1), weight=1)
-        self._metric_card(metrics, "金币", "gold", 0, 0, "#a36e00")
-        self._metric_card(metrics, "心情", "mood", 0, 1, "#c85178")
-        self._metric_card(metrics, "体力", "hunger", 1, 0, "#27834d")
-        self._metric_card(metrics, "清洁", "clean", 1, 1, "#287aa7")
-        self._status_row(left, "接口", "connection")
-        self._status_row(left, "金币", "gold")
-        self._status_row(left, "食物", "food")
-        self._status_row(left, "洗护", "bath")
-        self._status_row(left, "心情", "mood")
-        self._status_row(left, "体力", "hunger")
-        self._status_row(left, "清洁", "clean")
+        ttk.Label(left, text="账号状态", style="Title.TLabel").pack(anchor="w", pady=(0, 10))
+        self._status_row(left, "连接状态", "connection", small=True)
+        self._status_row(left, "会话通道", "transport", small=True)
         self._status_row(left, "当前任务", "story", small=True)
         self._status_row(left, "今日次数", "counts", small=True)
-        self._status_row(left, "自动 PK", "pk", small=True)
-        self._status_row(left, "好友访问", "friend_visits", small=True)
-        self._status_row(left, "好友照顾", "friend_care", small=True)
+
+        ttk.Separator(left).pack(fill=tk.X, pady=(8, 14))
+        ttk.Label(left, text="功能导航", style="Title.TLabel").pack(anchor="w", pady=(0, 8))
+        self._build_main_navigation(left)
+
+        ttk.Separator(left).pack(fill=tk.X, pady=(14, 14))
+        ttk.Label(left, text="自动托管", style="Title.TLabel").pack(anchor="w", pady=(0, 4))
 
         buttons = ttk.Frame(left)
-        buttons.pack(fill=tk.X, pady=(22, 0))
+        buttons.pack(fill=tk.X, pady=(8, 0))
         self.start_button = ttk.Button(
             buttons, text="启动自动托管", command=self._start, style="Primary.TButton"
         )
@@ -503,19 +523,47 @@ class MainWindow(tk.Tk):
         )
         ttk.Label(left, text=note, foreground="#666", justify=tk.LEFT).pack(anchor="w", pady=(18, 0))
 
-        notebook = ttk.Notebook(right)
+        notebook = ttk.Notebook(right, style="Workspace.TNotebook")
         notebook.pack(fill=tk.BOTH, expand=True)
+        self.notebook = notebook
+        dashboard_page = ttk.Frame(notebook)
         log_page = ttk.Frame(notebook, padding=10)
         manual_pk_page = ttk.Frame(notebook, padding=16)
         friend_care_page = ttk.Frame(notebook, padding=16)
         settings_page = ttk.Frame(notebook, padding=10)
+        notebook.add(dashboard_page, text="宠物总览")
         notebook.add(log_page, text="运行日志")
         notebook.add(manual_pk_page, text="PK 好友")
         notebook.add(friend_care_page, text="好友照顾")
         notebook.add(settings_page, text="设置")
+        notebook.bind("<<NotebookTabChanged>>", self._main_page_changed)
+        self._set_main_nav_selected("dashboard")
 
-        self.log_text = tk.Text(log_page, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 10))
-        log_scroll = ttk.Scrollbar(log_page, orient=tk.VERTICAL, command=self.log_text.yview)
+        self._build_dashboard_page(dashboard_page)
+
+        log_header = ttk.Frame(log_page)
+        log_header.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(log_header, text="运行日志", style="Title.TLabel").pack(side=tk.LEFT)
+        ttk.Label(
+            log_header,
+            text="任务、接口和重连信息集中显示",
+            foreground="#8190a6",
+        ).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(log_header, text="清空当前显示", command=self._clear_log_display).pack(side=tk.RIGHT)
+        log_body = ttk.Frame(log_page)
+        log_body.pack(fill=tk.BOTH, expand=True)
+        self.log_text = tk.Text(
+            log_body,
+            wrap=tk.WORD,
+            state=tk.DISABLED,
+            font=("Consolas", 10),
+            borderwidth=0,
+            padx=12,
+            pady=10,
+            background="#ffffff",
+            foreground="#34445b",
+        )
+        log_scroll = ttk.Scrollbar(log_body, orient=tk.VERTICAL, command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=log_scroll.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -792,6 +840,412 @@ class MainWindow(tk.Tk):
         ttk.Button(form, text="保存全部设置并立即生效", command=self._save_settings).pack(
             fill=tk.X, padx=6, pady=(10, 18)
         )
+
+    def _build_main_navigation(self, parent: ttk.Frame) -> None:
+        items = (
+            ("dashboard", "宠物总览", lambda: self._select_main_page(0, "dashboard")),
+            ("logs", "运行日志", lambda: self._select_main_page(1, "logs")),
+            ("pk", "PK 好友", lambda: self._select_main_page(2, "pk")),
+            ("friend_care", "好友照顾", lambda: self._select_main_page(3, "friend_care")),
+            ("settings", "设置中心", lambda: self._select_main_page(4, "settings")),
+            ("interface_test", "接口测试", self._open_interface_test),
+        )
+        for key, label, command in items:
+            button = tk.Button(
+                parent,
+                text=label,
+                command=command,
+                anchor="w",
+                relief=tk.FLAT,
+                borderwidth=0,
+                padx=14,
+                pady=8,
+                cursor="hand2",
+                font=("Microsoft YaHei UI", 10),
+            )
+            button.pack(fill=tk.X, pady=2)
+            self.main_nav_buttons[key] = button
+        self._set_main_nav_selected("dashboard")
+
+    def _set_main_nav_selected(self, key: str) -> None:
+        self.main_nav_active = key
+        for item_key, button in self.main_nav_buttons.items():
+            selected = item_key == key
+            button.configure(
+                background="#dcecff" if selected else "#f4f7fc",
+                foreground="#2f69ad" if selected else "#506179",
+                activebackground="#dcecff" if selected else "#e8eff8",
+                activeforeground="#2f69ad",
+                font=("Microsoft YaHei UI", 10, "bold" if selected else "normal"),
+            )
+
+    def _select_main_page(self, index: int, key: str) -> None:
+        self.notebook.select(index)
+        self._set_main_nav_selected(key)
+
+    def _main_page_changed(self, _event=None) -> None:
+        try:
+            index = int(self.notebook.index(self.notebook.select()))
+        except (tk.TclError, ValueError):
+            return
+        keys = ("dashboard", "logs", "pk", "friend_care", "settings")
+        if 0 <= index < len(keys):
+            self._set_main_nav_selected(keys[index])
+
+    def _open_interface_test(self) -> None:
+        self.notebook.select(4)
+        self._set_main_nav_selected("interface_test")
+        try:
+            index = next(
+                i for i, (key, _title, _prefixes) in enumerate(SETTING_SECTIONS)
+                if key == "interface_test"
+            )
+            self.settings_nav.selection_clear(0, tk.END)
+            self.settings_nav.selection_set(index)
+            self.settings_nav.activate(index)
+            self._settings_nav_selected()
+        except (AttributeError, StopIteration, tk.TclError):
+            return
+
+    def _clear_log_display(self) -> None:
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.delete("1.0", tk.END)
+        self.log_text.configure(state=tk.DISABLED)
+
+    def _build_dashboard_page(self, parent: ttk.Frame) -> None:
+        """Build the card-based home screen while keeping every existing tool reachable."""
+        canvas = tk.Canvas(parent, highlightthickness=0, background="#f7f9fd")
+        scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
+        content = tk.Frame(canvas, background="#f7f9fd", padx=18, pady=16)
+        window = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(window, width=event.width),
+        )
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.dashboard_canvas = canvas
+
+        profile = tk.Frame(
+            content,
+            background="#ffffff",
+            highlightbackground="#dce5f2",
+            highlightthickness=1,
+            padx=18,
+            pady=14,
+        )
+        profile.pack(fill=tk.X, pady=(0, 16))
+        pet_mark = tk.Label(
+            profile,
+            text="宠",
+            width=3,
+            height=1,
+            background="#dfeafa",
+            foreground="#4d78bd",
+            font=("Microsoft YaHei UI", 22, "bold"),
+        )
+        pet_mark.pack(side=tk.LEFT, padx=(0, 14))
+        identity = tk.Frame(profile, background="#ffffff")
+        identity.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            identity,
+            textvariable=self.status_vars["pet_name"],
+            background="#ffffff",
+            foreground="#25364c",
+            font=("Microsoft YaHei UI", 18, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            identity,
+            textvariable=self.status_vars["pet_id"],
+            background="#ffffff",
+            foreground="#8a99af",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(anchor="w", pady=(3, 0))
+        gold_box = tk.Frame(profile, background="#ffffff")
+        gold_box.pack(side=tk.RIGHT, padx=(16, 2))
+        tk.Label(
+            gold_box,
+            text="金币",
+            background="#ffffff",
+            foreground="#8998ad",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(anchor="e")
+        tk.Label(
+            gold_box,
+            textvariable=self.status_vars["gold"],
+            background="#ffffff",
+            foreground="#c18324",
+            font=("Microsoft YaHei UI", 17, "bold"),
+        ).pack(anchor="e", pady=(2, 0))
+
+        self._dashboard_heading(content, "宠物状态", "服务器实时读取，数值变化会自动刷新")
+        gauges = tk.Frame(content, background="#f7f9fd")
+        gauges.pack(fill=tk.X, pady=(8, 18))
+        for column in range(4):
+            gauges.columnconfigure(column, weight=1, uniform="status")
+        self._dashboard_gauge(gauges, "心情", "mood", "#7698d7", 0)
+        self._dashboard_gauge(gauges, "体力", "hunger", "#e4a253", 1)
+        self._dashboard_gauge(gauges, "清洁", "clean", "#65b39b", 2)
+        self._dashboard_gauge(gauges, "综合状态", "total", "#8b79c9", 3)
+
+        self._dashboard_heading(
+            content,
+            "食物库存",
+            "体力不足时按你的选择批量补充",
+            actions=(("立即喂食", lambda: self._run_interface_test("feed"), True),
+                     ("库存设置", lambda: self.notebook.select(4), False)),
+        )
+        food_grid = tk.Frame(content, background="#f7f9fd")
+        food_grid.pack(fill=tk.X, pady=(8, 18))
+        food_grid.columnconfigure((0, 1), weight=1, uniform="inventory")
+        self._inventory_card(
+            food_grid, 0, "饼干", self.status_vars["biscuits"], "5 金币",
+            "体力 +10 · 心情 +1", "食", "#e9f0fb", "#5c78ad",
+        )
+        self._inventory_card(
+            food_grid, 1, "虾仁", self.status_vars["shrimp"], "20 金币",
+            "体力 +20 · 心情 +10", "食", "#edf3fc", "#7186ad",
+        )
+
+        self._dashboard_heading(
+            content,
+            "洗护用品",
+            "清洁不足时按你的选择批量补充",
+            actions=(("立即洗澡", lambda: self._run_interface_test("wash"), True),
+                     ("库存设置", lambda: self.notebook.select(4), False)),
+        )
+        bath_grid = tk.Frame(content, background="#f7f9fd")
+        bath_grid.pack(fill=tk.X, pady=(8, 18))
+        bath_grid.columnconfigure((0, 1), weight=1, uniform="inventory")
+        self._inventory_card(
+            bath_grid, 0, "香皂片", self.status_vars["soap"], "2 金币",
+            "清洁 +10 · 心情 +1", "净", "#fff1d9", "#a47730",
+        )
+        self._inventory_card(
+            bath_grid, 1, "沐浴球", self.status_vars["bath_ball"], "12 金币",
+            "清洁 +20 · 心情 +10", "净", "#efe9fb", "#8776b8",
+        )
+
+        tk.Label(
+            content,
+            text="更多操作可从顶部进入运行日志、PK 好友、好友照顾和设置。",
+            background="#f7f9fd",
+            foreground="#8a99af",
+            font=("Microsoft YaHei UI", 8),
+        ).pack(anchor="e", pady=(0, 2))
+
+    @staticmethod
+    def _dashboard_heading(
+        parent: tk.Widget,
+        title: str,
+        subtitle: str,
+        actions: tuple[tuple[str, Any, bool], ...] = (),
+    ) -> None:
+        row = tk.Frame(parent, background="#f7f9fd")
+        row.pack(fill=tk.X)
+        copy = tk.Frame(row, background="#f7f9fd")
+        copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            copy,
+            text=title,
+            background="#f7f9fd",
+            foreground="#2d3e55",
+            font=("Microsoft YaHei UI", 12, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            copy,
+            text=subtitle,
+            background="#f7f9fd",
+            foreground="#8a99af",
+            font=("Microsoft YaHei UI", 8),
+        ).pack(anchor="w", pady=(2, 0))
+        for label, command, primary in reversed(actions):
+            tk.Button(
+                row,
+                text=label,
+                command=command,
+                background="#8fc4ff" if primary else "#ffffff",
+                foreground="#ffffff" if primary else "#64748c",
+                activebackground="#77b4f7" if primary else "#eef4fb",
+                activeforeground="#ffffff" if primary else "#4b607e",
+                relief=tk.FLAT,
+                borderwidth=0,
+                padx=14,
+                pady=6,
+                font=("Microsoft YaHei UI", 9, "bold" if primary else "normal"),
+                cursor="hand2",
+            ).pack(side=tk.RIGHT, padx=(8, 0))
+
+    def _dashboard_gauge(
+        self,
+        parent: tk.Widget,
+        title: str,
+        key: str,
+        accent: str,
+        column: int,
+        numeric: bool = True,
+    ) -> None:
+        card = tk.Frame(
+            parent,
+            background="#f4f7fc",
+            highlightbackground="#d9e3f1",
+            highlightthickness=1,
+            padx=10,
+            pady=10,
+        )
+        card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 6, 0), pady=2)
+        gauge = tk.Canvas(card, width=112, height=84, background="#f4f7fc", highlightthickness=0)
+        gauge.pack(anchor="center")
+        gauge.create_arc(19, 7, 93, 81, start=145, extent=250, style=tk.ARC, width=8, outline="#e5ebf4")
+        value_var = self.status_vars[key]
+        value_item = gauge.create_text(56, 45, text="--", fill="#5c6e89", font=("Microsoft YaHei UI", 10, "bold"))
+        arc_item = gauge.create_arc(19, 7, 93, 81, start=145, extent=0, style=tk.ARC, width=8, outline=accent)
+
+        def redraw(*_args: Any) -> None:
+            raw = value_var.get()
+            match = re.search(r"-?\d+(?:\.\d+)?", raw)
+            amount = max(0.0, min(100.0, float(match.group()) if match else 0.0))
+            gauge.itemconfigure(arc_item, extent=250 * amount / 100 if numeric else 250)
+            gauge.itemconfigure(value_item, text=f"{amount:g}%" if numeric and match else (raw[:12] or "--"))
+
+        value_var.trace_add("write", redraw)
+        redraw()
+        tk.Label(
+            card,
+            text=title,
+            background="#f4f7fc",
+            foreground="#64748c",
+            font=("Microsoft YaHei UI", 9),
+        ).pack()
+        tk.Label(
+            card,
+            textvariable=value_var,
+            background="#f4f7fc",
+            foreground="#4e6ea9" if numeric else "#70819a",
+            font=("Microsoft YaHei UI", 12 if numeric else 8, "bold"),
+            wraplength=145,
+        ).pack(pady=(4, 0))
+
+    @staticmethod
+    def _inventory_card(
+        parent: tk.Widget,
+        column: int,
+        name: str,
+        quantity: tk.StringVar,
+        price: str,
+        benefit: str,
+        mark: str,
+        mark_background: str,
+        mark_foreground: str,
+    ) -> None:
+        card = tk.Frame(
+            parent,
+            background="#ffffff",
+            highlightbackground="#dce5f2",
+            highlightthickness=1,
+            padx=12,
+            pady=11,
+        )
+        card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 7, 0))
+        tk.Label(
+            card,
+            text=mark,
+            width=3,
+            height=1,
+            background=mark_background,
+            foreground=mark_foreground,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 12))
+        copy = tk.Frame(card, background="#ffffff")
+        copy.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        header = tk.Frame(copy, background="#ffffff")
+        header.pack(fill=tk.X)
+        tk.Label(
+            header,
+            text=name,
+            background="#ffffff",
+            foreground="#2f4056",
+            font=("Microsoft YaHei UI", 11, "bold"),
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            header,
+            text=price,
+            background="#ffffff",
+            foreground="#5875ae",
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side=tk.RIGHT)
+        inventory = tk.Frame(copy, background="#eaf0f9", padx=8, pady=4)
+        inventory.pack(fill=tk.X, pady=(5, 4))
+        tk.Label(
+            inventory,
+            text="当前库存",
+            background="#eaf0f9",
+            foreground="#7890b2",
+            font=("Microsoft YaHei UI", 8),
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            inventory,
+            textvariable=quantity,
+            background="#eaf0f9",
+            foreground="#4f6faa",
+            font=("Microsoft YaHei UI", 11, "bold"),
+        ).pack(side=tk.RIGHT)
+        tk.Label(
+            copy,
+            text=benefit,
+            background="#ffffff",
+            foreground="#8494aa",
+            font=("Microsoft YaHei UI", 8),
+        ).pack(anchor="w")
+
+    @staticmethod
+    def _dashboard_action_row(
+        parent: tk.Widget,
+        title: str,
+        value: tk.StringVar,
+        button_text: str,
+        command: Any,
+    ) -> None:
+        row = tk.Frame(parent, background="#f7f9fd", pady=12)
+        row.pack(fill=tk.X)
+        copy = tk.Frame(row, background="#f7f9fd")
+        copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            copy,
+            text=title,
+            background="#f7f9fd",
+            foreground="#2f4056",
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            copy,
+            textvariable=value,
+            background="#f7f9fd",
+            foreground="#8797ad",
+            font=("Microsoft YaHei UI", 8),
+            wraplength=620,
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(3, 0))
+        tk.Button(
+            row,
+            text=button_text,
+            command=command,
+            background="#f7f9fd",
+            foreground="#5e89c7",
+            activebackground="#eaf2fc",
+            relief=tk.FLAT,
+            highlightbackground="#9fc7fb",
+            highlightthickness=1,
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(side=tk.RIGHT)
 
     def _build_interface_test_section(self, section: ttk.Frame) -> None:
         ttk.Label(
@@ -1088,7 +1542,7 @@ class MainWindow(tk.Tk):
 
     def _route_mousewheel(self, event: tk.Event) -> str | None:
         """Scroll the panel under the pointer instead of hiding lower controls."""
-        for canvas in (self.left_status_canvas, self.settings_canvas):
+        for canvas in (self.left_status_canvas, self.dashboard_canvas, self.settings_canvas):
             left = canvas.winfo_rootx()
             top = canvas.winfo_rooty()
             if (
@@ -1102,10 +1556,18 @@ class MainWindow(tk.Tk):
 
     def _status_row(self, parent: ttk.Frame, title: str, key: str, small: bool = False) -> None:
         frame = ttk.Frame(parent)
-        frame.pack(fill=tk.X, pady=6)
-        ttk.Label(frame, text=title, width=10).pack(side=tk.LEFT)
-        style = "Title.TLabel" if small else "Value.TLabel"
-        ttk.Label(frame, textvariable=self.status_vars[key], style=style).pack(side=tk.RIGHT)
+        frame.pack(fill=tk.X, pady=(3, 9))
+        ttk.Label(frame, text=title, foreground="#7f8da2").pack(anchor="w")
+        tk.Label(
+            frame,
+            textvariable=self.status_vars[key],
+            background="#f4f7fc",
+            foreground="#304761",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            justify=tk.LEFT,
+            anchor="w",
+            wraplength=280,
+        ).pack(fill=tk.X, pady=(2, 0))
 
     def _build_manual_pk_page(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="手动 PK 专区", style="Title.TLabel").grid(
@@ -1334,6 +1796,23 @@ class MainWindow(tk.Tk):
 
     def _load_settings(self) -> None:
         config = self.config_store.data
+        connection_mode = str(config.get("connection", {}).get("mode") or "legacy_mobile_bridge")
+        self.status_vars["transport"].set(
+            "Android QQ · DPAPI 加密会话"
+            if connection_mode == "standalone_mobile"
+            else "手机 QQ · 单次 Hook 持续复用"
+        )
+        account_uin = str(config.get("account", {}).get("uin", "")).strip()
+        pet_id = str(config.get("account", {}).get("pet_id", "")).strip()
+        if account_uin or pet_id:
+            self.status_vars["pet_id"].set(
+                " · ".join(
+                    part for part in (
+                        f"QQ {account_uin}" if account_uin else "",
+                        f"Pet ID {pet_id}" if pet_id else "",
+                    ) if part
+                )
+            )
         for path, (variable, _value_type) in self.setting_vars.items():
             value = deep_get(config, path)
             if path in CHOICE_FIELDS:
@@ -2444,6 +2923,8 @@ class MainWindow(tk.Tk):
                     self._set_interface_test_busy(False)
                 elif kind == "own_pet_profile":
                     profile = payload
+                    self.status_vars["pet_name"].set(profile.pet_name or "我的 QQ 宠物")
+                    self.status_vars["pet_id"].set(f"QQ {profile.user_id} · Pet ID {profile.pet_id}")
                     self.setting_vars["account.uin"][0].set(profile.user_id)
                     self.setting_vars["account.pet_id"][0].set(profile.pet_id)
                     config = self.config_store.data
@@ -2471,10 +2952,14 @@ class MainWindow(tk.Tk):
                     )
                     self.status_vars["gold"].set(f"{values.gold:.2f}")
                     inventory = state.get("food_inventory", {})
+                    self.status_vars["biscuits"].set(str(inventory.get("biscuits", "--")))
+                    self.status_vars["shrimp"].set(str(inventory.get("shrimp", "--")))
                     self.status_vars["food"].set(
                         f"饼干 {inventory.get('biscuits', '--')} / 虾仁 {inventory.get('shrimp', '--')}"
                     )
                     bath_inventory = state.get("bath_inventory", {})
+                    self.status_vars["soap"].set(str(bath_inventory.get("soap", "--")))
+                    self.status_vars["bath_ball"].set(str(bath_inventory.get("bath_ball", "--")))
                     self.status_vars["bath"].set(
                         f"香皂片 {bath_inventory.get('soap', '--')} / "
                         f"沐浴球 {bath_inventory.get('bath_ball', '--')}"
@@ -2482,6 +2967,7 @@ class MainWindow(tk.Tk):
                     self.status_vars["mood"].set(f"{values.feel:.1f}/100")
                     self.status_vars["hunger"].set(f"{values.hunger:.1f}/100")
                     self.status_vars["clean"].set(f"{values.clean:.1f}/100")
+                    self.status_vars["total"].set(f"{values.total:.1f}/100")
                     self.optimization_auto_var.set(
                         state.get(
                             "optimization_auto_summary",

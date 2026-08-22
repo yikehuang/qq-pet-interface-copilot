@@ -10,7 +10,9 @@ import subprocess
 import sys
 import threading
 import urllib.request
+import urllib.parse
 import zipfile
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,31 @@ _SESSION_KEYS = {
     "qimei",
     "deviceName",
 }
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def external_api_security(url: str) -> dict[str, Any]:
+    """Describe an optional signer without exposing its host, path, or query."""
+    value = str(url or "").strip()
+    if not value:
+        return {"enabled": False, "transport": "none", "security": "not_configured"}
+    parsed = urllib.parse.urlparse(value)
+    host = (parsed.hostname or "").casefold()
+    loopback = host in {"127.0.0.1", "localhost", "::1"}
+    if parsed.scheme == "https":
+        security = "encrypted"
+    elif parsed.scheme == "http" and loopback:
+        security = "loopback_only"
+    else:
+        security = "insecure_compatibility"
+    return {
+        "enabled": True,
+        "transport": parsed.scheme or "unknown",
+        "security": security,
+    }
 
 
 def sanitize_android_session(value: dict[str, Any]) -> dict[str, Any]:
@@ -196,6 +223,14 @@ class AcidifyBridge:
         self._lock = threading.Lock()
         self._next_id = 0
 
+    @property
+    def alive(self) -> bool:
+        return self._process.poll() is None
+
+    @property
+    def pid(self) -> int:
+        return int(self._process.pid)
+
     def call(self, method: str, **payload: Any) -> dict[str, Any]:
         with self._lock:
             if self._process.poll() is not None:
@@ -249,6 +284,9 @@ class AcidifyProtocolService:
         self._state = "needs_session_import"
         self._uin = ""
         self._last_error = ""
+        self._connect_count = 0
+        self._reconnect_count = 0
+        self._last_transition_at = _utc_now()
         self._lock = threading.RLock()
 
     def start(self) -> None:
@@ -258,6 +296,9 @@ class AcidifyProtocolService:
             self._set_error(str(exc))
             return
         if session is None:
+            with self._lock:
+                self._state = "needs_session_import"
+                self._last_transition_at = _utc_now()
             return
         try:
             session = sanitize_android_session(session)
@@ -272,6 +313,8 @@ class AcidifyProtocolService:
                 self._bridge = bridge
                 self._uin = str(initialized.get("uin") or session["uin"])
                 self._state = "connecting"
+                self._connect_count += 1
+                self._last_transition_at = _utc_now()
                 self._last_error = ""
             threading.Thread(target=self._connect, daemon=True).start()
         except Exception as exc:
@@ -287,6 +330,7 @@ class AcidifyProtocolService:
             with self._lock:
                 self._uin = str(refreshed["uin"])
                 self._state = "online"
+                self._last_transition_at = _utc_now()
                 self._last_error = ""
         except Exception as exc:
             self._set_error(str(exc))
@@ -295,9 +339,27 @@ class AcidifyProtocolService:
         with self._lock:
             self._state = "error"
             self._last_error = message[:500]
+            self._last_transition_at = _utc_now()
+
+    def reconnect(self) -> None:
+        """Rebuild the authenticated transport without replaying a business request."""
+        with self._lock:
+            if self._state in {"connecting", "reconnecting"}:
+                return
+            bridge = self._bridge
+            self._bridge = None
+            self._state = "reconnecting"
+            self._last_error = ""
+            self._reconnect_count += 1
+            self._last_transition_at = _utc_now()
+        if bridge is not None:
+            bridge.close()
+        self.start()
 
     def health(self) -> dict[str, Any]:
         with self._lock:
+            bridge = self._bridge
+            bridge_alive = bool(bridge and getattr(bridge, "alive", True))
             return {
                 "ok": True,
                 "protocol_family": "android_qq",
@@ -307,6 +369,21 @@ class AcidifyProtocolService:
                 "uin": self._uin,
                 "last_error": self._last_error,
                 "signer_state": "configured" if self.sign_url else "not_configured",
+                "session_security": {
+                    "password_stored": False,
+                    "vault": "windows_dpapi",
+                    "sensitive_fields": "redacted",
+                },
+                "transport": {
+                    "local_api": "http_loopback",
+                    "bridge": "jsonl_stdio",
+                    "qq_channel": "android_core_tcp",
+                    "bridge_alive": bridge_alive,
+                    "connect_count": self._connect_count,
+                    "reconnect_count": self._reconnect_count,
+                    "last_transition_at": self._last_transition_at,
+                },
+                "external_api": external_api_security(self.sign_url),
                 "writes_enabled": self.writes_enabled,
                 "login_capabilities": {
                     "qr": False,
@@ -365,6 +442,7 @@ class AcidifyProtocolService:
             self._state = "needs_session_import"
             self._uin = ""
             self._last_error = ""
+            self._last_transition_at = _utc_now()
         if bridge is not None:
             bridge.close()
         self.vault.clear()
@@ -376,6 +454,7 @@ class AcidifyProtocolService:
             self._bridge = None
             if self._state == "online":
                 self._state = "offline"
+                self._last_transition_at = _utc_now()
         if bridge is not None:
             bridge.close()
 
@@ -425,6 +504,9 @@ def _handler(service: AcidifyProtocolService):
                 elif self.path == "/v1/login/logout":
                     service.logout()
                     self._json(200, {"ok": True})
+                elif self.path == "/v1/session/reconnect":
+                    service.reconnect()
+                    self._json(202, {"ok": True, "session_state": service.health()["session_state"]})
                 elif self.path == "/v1/login/qr":
                     self._json(501, {"ok": False, "code": "qr_unavailable", "message": "Android 后端不支持二维码登录，请导入已授权会话"})
                 else:

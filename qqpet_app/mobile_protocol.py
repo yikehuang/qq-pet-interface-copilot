@@ -262,6 +262,9 @@ class MobileProtocolReader:
         self._lock = threading.RLock()
         self._session: Any = None
         self._script: Any = None
+        self._attached_pid: int | None = None
+        self._attach_count = 0
+        self._reconnect_count = 0
         # Frida 17.x on Android x86_64 can crash the target while unloading
         # frida-agent. Keep failed live sessions referenced instead of calling
         # script.unload()/session.detach() inside a running QQ process.
@@ -562,6 +565,7 @@ class MobileProtocolReader:
         script, session = self._script, self._session
         self._script = None
         self._session = None
+        self._attached_pid = None
         if script is None and session is None:
             return
         try:
@@ -582,6 +586,7 @@ class MobileProtocolReader:
             except Exception:
                 self._disconnect()
 
+        reconnecting = self._attach_count > 0
         self._ensure_forward()
         frida = self._load_frida()
         bundled_root = Path(getattr(sys, "_MEIPASS", self.project_root))
@@ -625,17 +630,35 @@ class MobileProtocolReader:
             script.load()
             self._session = session
             self._script = script
+            self._attached_pid = int(process.pid)
             script.exports_sync.ping()
             if not bool(script.exports_sync.java_ready()):
                 raise MobileProtocolUnavailable(
                     "Frida 已连接，但 Java 桥接未就绪；请关闭并重新打开模拟器 QQ 后重试"
                 )
+            self._attach_count += 1
+            if reconnecting:
+                self._reconnect_count += 1
         except MobileProtocolUnavailable:
             self._disconnect()
             raise
         except Exception as exc:
             self._disconnect()
             raise MobileProtocolUnavailable(f"手机协议连接失败：{exc}") from exc
+
+    def ensure_persistent_connection(self) -> dict[str, int | bool | None]:
+        """Attach once and keep reusing the agent for this QQ process lifetime."""
+        with self._lock:
+            self._connect()
+            return self.connection_status()
+
+    def connection_status(self) -> dict[str, int | bool | None]:
+        return {
+            "connected": self._script is not None and self._session is not None,
+            "pid": self._attached_pid,
+            "attach_count": self._attach_count,
+            "reconnect_count": self._reconnect_count,
+        }
 
     def _send_read(self, spec: tuple[str, int, int], body: bytes) -> bytes:
         with self._lock:

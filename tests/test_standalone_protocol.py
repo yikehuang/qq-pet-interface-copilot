@@ -80,6 +80,52 @@ class StandaloneProtocolTests(unittest.TestCase):
         config["connection"]["mode"] = "legacy_mobile_bridge"
         self.assertIsNone(reader_from_config(config))
 
+    def test_reconnect_session_uses_control_endpoint_only(self) -> None:
+        reader = StandaloneProtocolReader("http://127.0.0.1:17890")
+        with patch.object(reader, "_request", return_value={"ok": True}) as request:
+            reader.reconnect_session()
+        request.assert_called_once_with("POST", "/v1/session/reconnect", {})
+
+    def test_offline_session_reconnects_once_before_any_business_request(self) -> None:
+        reader = StandaloneProtocolReader("http://127.0.0.1:17890")
+        request = Mock(
+            side_effect=[
+                {
+                    "ok": True,
+                    "protocol_family": "android_qq",
+                    "session_state": "offline",
+                },
+                {"ok": True, "session_state": "reconnecting"},
+                {
+                    "ok": True,
+                    "protocol_family": "android_qq",
+                    "session_state": "online",
+                    "uin": "123456",
+                },
+            ]
+        )
+        with patch.object(reader, "_request", request):
+            self.assertEqual(reader.get_self_uin(), "123456")
+        self.assertEqual(
+            [(call.args[0], call.args[1]) for call in request.call_args_list],
+            [("GET", "/v1/health"), ("POST", "/v1/session/reconnect"), ("GET", "/v1/health")],
+        )
+
+    def test_missing_session_is_not_reconnected_automatically(self) -> None:
+        reader = StandaloneProtocolReader("http://127.0.0.1:17890")
+        with patch.object(
+            reader,
+            "_request",
+            return_value={
+                "ok": True,
+                "protocol_family": "android_qq",
+                "session_state": "needs_session_import",
+            },
+        ) as request:
+            with self.assertRaisesRegex(StandaloneProtocolUnavailable, "导入已授权会话"):
+                reader.get_self_uin()
+        request.assert_called_once_with("GET", "/v1/health")
+
     def test_qr_request_stops_when_mobile_backend_reports_it_unavailable(self) -> None:
         reader = StandaloneProtocolReader("http://127.0.0.1:17890")
         with patch.object(

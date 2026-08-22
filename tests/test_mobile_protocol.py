@@ -21,6 +21,36 @@ from qqpet_app.proto import field_bytes, field_fixed32
 
 
 class MobileProtocolTests(unittest.TestCase):
+    def test_persistent_connection_reuses_existing_agent(self) -> None:
+        reader = MobileProtocolReader(".")
+
+        class Exports:
+            ping_calls = 0
+
+            @classmethod
+            def ping(cls):
+                cls.ping_calls += 1
+
+            @staticmethod
+            def java_ready():
+                return True
+
+        class Script:
+            exports_sync = Exports()
+
+        reader._script = Script()
+        reader._session = object()
+        reader._attached_pid = 123
+        reader._attach_count = 1
+
+        first = reader.ensure_persistent_connection()
+        second = reader.ensure_persistent_connection()
+
+        self.assertEqual(Exports.ping_calls, 2)
+        self.assertEqual(first["attach_count"], 1)
+        self.assertEqual(second["reconnect_count"], 0)
+        self.assertEqual(second["pid"], 123)
+
     def test_logged_out_runtime_is_rejected_even_when_uin_is_cached(self) -> None:
         reader = MobileProtocolReader(".")
         reader._connect = lambda: None  # type: ignore[method-assign]

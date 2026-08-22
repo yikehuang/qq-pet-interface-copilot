@@ -5,10 +5,12 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from qqpet_app.acidify_host import (
     AcidifyHostError,
     AcidifyProtocolService,
+    external_api_security,
     import_android_session,
     sanitize_android_session,
 )
@@ -46,6 +48,7 @@ class MemoryVault:
 class FakeBridge:
     def __init__(self, _node, _script):
         self.requests = []
+        self.closed = False
 
     def call(self, method, **payload):
         self.requests.append((method, payload))
@@ -60,7 +63,7 @@ class FakeBridge:
         return {}
 
     def close(self):
-        return None
+        self.closed = True
 
 
 class AcidifyHostTests(unittest.TestCase):
@@ -109,6 +112,35 @@ class AcidifyHostTests(unittest.TestCase):
         self.assertNotIn("secret.local", rendered)
         self.assertNotIn("wloginSigs", rendered)
         self.assertEqual(status["signer_state"], "configured")
+        self.assertFalse(status["session_security"]["password_stored"])
+        self.assertEqual(status["session_security"]["vault"], "windows_dpapi")
+        self.assertEqual(status["transport"]["qq_channel"], "android_core_tcp")
+        self.assertEqual(status["external_api"]["security"], "insecure_compatibility")
+
+    def test_external_api_summary_redacts_destination(self) -> None:
+        encrypted = external_api_security("https://sign.example.test/private?token=secret")
+        loopback = external_api_security("http://127.0.0.1:8080/sign?token=secret")
+        rendered = json.dumps({"encrypted": encrypted, "loopback": loopback})
+        self.assertEqual(encrypted["security"], "encrypted")
+        self.assertEqual(loopback["security"], "loopback_only")
+        self.assertNotIn("example.test", rendered)
+        self.assertNotIn("token", rendered)
+        self.assertNotIn("secret", rendered)
+
+    def test_reconnect_rebuilds_transport_without_business_replay(self) -> None:
+        service = AcidifyProtocolService(Path("."), MemoryVault(valid_session()))
+        bridge = FakeBridge(None, None)
+        service._bridge = bridge
+        service._state = "online"
+        starts = []
+        with patch.object(service, "start", side_effect=lambda: starts.append("start")):
+            service.reconnect()
+        self.assertTrue(bridge.closed)
+        self.assertEqual(starts, ["start"])
+        self.assertEqual(bridge.requests, [])
+        status = service.health()
+        self.assertEqual(status["session_state"], "reconnecting")
+        self.assertEqual(status["transport"]["reconnect_count"], 1)
 
     def test_normal_close_preserves_encrypted_session(self) -> None:
         vault = MemoryVault(valid_session())

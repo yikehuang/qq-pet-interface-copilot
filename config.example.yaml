@@ -23,6 +23,8 @@
     "process_name": "com.tencent.mobileqq",
     "adb_serial": "127.0.0.1:16416",
     "adb_path": "",
+    "persistent_connection": true,
+    "prepare_on_scheduler_start": true,
     "auto_reconnect": true,
     "reconnect_initial_seconds": 3,
     "reconnect_max_seconds": 60
@@ -55,8 +57,11 @@
   "adventure": {
     "enabled": true,
     "option_name": "",
+    "maximize_gold": true,
+    "recall_lower_reward": true,
+    "limit_enabled": false,
     "start_time": "20:00",
-    "times_per_day": 3
+    "times_per_day": 0
   },
   "pk": {
     "enabled": false,
@@ -91,10 +96,14 @@
     "enabled": false,
     "feed_enabled": true,
     "clean_enabled": true,
+    "food_item": "auto",
+    "auto_buy_supplies": true,
+    "food_purchase_count": 10,
+    "bath_purchase_count": 10,
     "check_interval_seconds": 60,
     "hunger_threshold": 80,
     "clean_threshold": 80,
-    "bath_item": "soap",
+    "bath_item": "auto",
     "verify_delay_seconds": 1,
     "verify_attempts": 5,
     "max_feeds_per_friend_per_check": 10,

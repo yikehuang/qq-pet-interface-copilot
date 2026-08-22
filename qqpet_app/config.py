@@ -31,6 +31,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "process_name": "com.tencent.mobileqq",
         "adb_serial": "127.0.0.1:16416",
         "adb_path": "",
+        "persistent_connection": True,
+        "prepare_on_scheduler_start": True,
         "auto_reconnect": True,
         "reconnect_initial_seconds": 3,
         "reconnect_max_seconds": 60,
@@ -81,8 +83,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "adventure": {
         "enabled": True,
         "option_name": "",
+        "maximize_gold": True,
+        "recall_lower_reward": True,
+        "limit_enabled": False,
         "start_time": "20:00",
-        "times_per_day": 3,
+        "times_per_day": 0,
     },
     "pk": {
         "enabled": False,
@@ -117,10 +122,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": False,
         "feed_enabled": True,
         "clean_enabled": True,
+        "food_item": "auto",
+        "auto_buy_supplies": True,
+        "food_purchase_count": 10,
+        "bath_purchase_count": 10,
         "check_interval_seconds": 60,
         "hunger_threshold": 80,
         "clean_threshold": 80,
-        "bath_item": "soap",
+        "bath_item": "auto",
         "verify_delay_seconds": 1,
         "verify_attempts": 5,
         "max_feeds_per_friend_per_check": 10,
@@ -197,6 +206,22 @@ def _migrate_loaded(config: dict[str, Any]) -> dict[str, Any]:
         # Work used 0=unlimited and a positive number=limited before the UI had
         # an explicit switch, so retain that behavior during upgrade.
         work["limit_enabled"] = int(work.get("times_per_day", 0) or 0) > 0
+    adventure = migrated.get("adventure")
+    if isinstance(adventure, dict) and "limit_enabled" not in adventure:
+        # Adventure has no verified daily server-side count limit. Older local
+        # defaults used 3, so migrate them to unlimited unless explicitly enabled.
+        adventure["limit_enabled"] = False
+    # Older builds accepted values above the mobile packet's 1-99 range. Clamp
+    # them during upgrade; new saves are rejected by validation instead.
+    for section, key in (
+        ("care", "food_purchase_count"),
+        ("care", "soap_purchase_count"),
+        ("friend_care", "food_purchase_count"),
+        ("friend_care", "bath_purchase_count"),
+    ):
+        values = migrated.get(section)
+        if isinstance(values, dict) and key in values:
+            values[key] = max(1, min(99, int(values[key])))
     return migrated
 
 
@@ -306,6 +331,11 @@ class ConfigStore:
             raise ValueError("手动雇佣好友必须同时保存 QQ 号和宠物 ID")
         if not isinstance(config["adventure"].get("option_name", ""), str):
             raise ValueError("adventure.option_name 必须是字符串")
+        adventure_limit = int(config["adventure"].get("times_per_day", 0))
+        if adventure_limit < 0:
+            raise ValueError("adventure.times_per_day 不能小于 0")
+        if config["adventure"].get("limit_enabled") and adventure_limit <= 0:
+            raise ValueError("启用每日冒险次数限制后，冒险次数必须大于 0")
         hours, minutes = map(int, str(config["adventure"]["start_time"]).split(":"))
         if not (0 <= hours <= 23 and 0 <= minutes <= 59):
             raise ValueError("adventure.start_time 必须是 HH:MM")
@@ -352,8 +382,16 @@ class ConfigStore:
             raise ValueError("friend_care.hunger_threshold 必须在 0 到 100 之间")
         if not 0 <= float(config["friend_care"]["clean_threshold"]) <= 100:
             raise ValueError("friend_care.clean_threshold 必须在 0 到 100 之间")
-        if str(config["friend_care"]["bath_item"]) not in {"soap", "bath_ball"}:
-            raise ValueError("friend_care.bath_item 必须是 soap 或 bath_ball")
+        if str(config["friend_care"]["bath_item"]) not in {"auto", "soap", "bath_ball"}:
+            raise ValueError("friend_care.bath_item 必须是 auto/soap/bath_ball")
+        if str(config["friend_care"].get("food_item", "auto")) not in {
+            "auto", "biscuit", "shrimp"
+        }:
+            raise ValueError("friend_care.food_item 必须是 auto/biscuit/shrimp")
+        if not 1 <= int(config["friend_care"].get("food_purchase_count", 0)) <= 99:
+            raise ValueError("friend_care.food_purchase_count 必须在 1 到 99 之间")
+        if not 1 <= int(config["friend_care"].get("bath_purchase_count", 0)) <= 99:
+            raise ValueError("friend_care.bath_purchase_count 必须在 1 到 99 之间")
         if float(config["friend_care"]["verify_delay_seconds"]) < 0:
             raise ValueError("friend_care.verify_delay_seconds 不能小于 0")
         if not 1 <= int(config["friend_care"]["verify_attempts"]) <= 10:
@@ -395,10 +433,10 @@ class ConfigStore:
         ):
             if float(config[section][key]) < 0:
                 raise ValueError(f"{section}.{key} 不能小于 0")
-        if int(config["care"]["food_purchase_count"]) <= 0:
-            raise ValueError("care.food_purchase_count 必须大于 0")
-        if int(config["care"]["soap_purchase_count"]) <= 0:
-            raise ValueError("care.soap_purchase_count 必须大于 0")
+        if not 1 <= int(config["care"]["food_purchase_count"]) <= 99:
+            raise ValueError("care.food_purchase_count 必须在 1 到 99 之间")
+        if not 1 <= int(config["care"]["soap_purchase_count"]) <= 99:
+            raise ValueError("care.soap_purchase_count 必须在 1 到 99 之间")
         if config["care"].get("food_item", "biscuit") not in {"biscuit", "shrimp"}:
             raise ValueError("care.food_item 必须是 biscuit/shrimp")
         if config["care"].get("bath_item", "soap") not in {"soap", "bath_ball"}:

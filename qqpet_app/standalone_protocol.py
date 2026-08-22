@@ -89,9 +89,22 @@ class StandaloneProtocolReader:
             )
         return result
 
+    def reconnect_session(self) -> dict:
+        """Rebuild the authenticated transport without replaying any pet command."""
+        return self._request("POST", "/v1/session/reconnect", {})
+
     def get_self_uin(self) -> str:
         status = self.health()
-        if str(status.get("session_state") or "").casefold() != "online":
+        state = str(status.get("session_state") or "").casefold()
+        if state in {"offline", "error"}:
+            self.reconnect_session()
+            status = self.health()
+            state = str(status.get("session_state") or "").casefold()
+        if state != "online":
+            if state in {"connecting", "reconnecting"}:
+                raise StandaloneProtocolUnavailable(
+                    "纯电脑手机 QQ 会话正在重连，请稍后重试；本次业务指令没有发送"
+                )
             raise StandaloneProtocolUnavailable("纯电脑手机 QQ 尚未登录，请先导入已授权会话")
         uin = str(status.get("uin") or "")
         if not uin.isdigit():

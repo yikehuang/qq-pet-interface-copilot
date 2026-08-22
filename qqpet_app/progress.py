@@ -151,6 +151,27 @@ class DailyProgress:
             profile["verified_at"] = datetime.now().astimezone().isoformat()
             self._save()
 
+    def adventure_reward_observations(self) -> dict[str, Any]:
+        with self._lock:
+            profile = self._state.setdefault("economy_profile", {})
+            return copy.deepcopy(profile.setdefault("adventure_rewards", {}))
+
+    def record_adventure_reward(self, name: str, gold: float) -> None:
+        name = str(name).strip()
+        if not name or gold <= 0:
+            return
+        with self._lock:
+            rewards = self._state.setdefault("economy_profile", {}).setdefault(
+                "adventure_rewards", {}
+            )
+            row = rewards.setdefault(name, {"samples": 0, "total_gold": 0.0})
+            row["samples"] = int(row.get("samples", 0)) + 1
+            row["total_gold"] = float(row.get("total_gold", 0.0)) + float(gold)
+            row["average_gold"] = row["total_gold"] / row["samples"]
+            row["last_gold"] = float(gold)
+            row["verified_at"] = datetime.now().astimezone().isoformat()
+            self._save()
+
     def record_activity_minutes(self, kind: str, minutes: int) -> int:
         if kind not in {"school", "work"} or minutes <= 0:
             return int(self.snapshot().get("optimizer", {}).get("active_minutes", 0))
@@ -261,3 +282,23 @@ class DailyProgress:
         with self._lock:
             if self._state.get("care_blocks", {}).pop(kind, None) is not None:
                 self._save()
+
+    def clear_retryable_supply_blocks(self) -> int:
+        """Clear pre-send supply failures on restart, preserving uncertain writes."""
+        with self._lock:
+            blocks = self._state.get("care_blocks", {})
+            removed = 0
+            for key, block in tuple(blocks.items()):
+                if not (
+                    key in {"feed", "wash"}
+                    or key.startswith("friend_feed:")
+                    or key.startswith("friend_wash:")
+                ):
+                    continue
+                reason = str((block or {}).get("reason", ""))
+                if any(word in reason for word in ("不足", "购买", "备货", "库存")):
+                    blocks.pop(key, None)
+                    removed += 1
+            if removed:
+                self._save()
+            return removed
