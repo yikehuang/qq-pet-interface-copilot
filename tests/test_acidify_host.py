@@ -142,6 +142,14 @@ class AcidifyHostTests(unittest.TestCase):
         self.assertEqual(status["session_state"], "reconnecting")
         self.assertEqual(status["transport"]["reconnect_count"], 1)
 
+    def test_missing_signer_has_non_retrying_blocked_state(self) -> None:
+        service = AcidifyProtocolService(Path("."), MemoryVault(valid_session()))
+        service._set_error("Android signer is not configured")
+        status = service.health()
+        self.assertEqual(status["session_state"], "blocked_signer")
+        self.assertEqual(status["signer_requirement"]["protocol_version"], "9.2.80")
+        self.assertFalse(status["signer_requirement"]["ready"])
+
     def test_normal_close_preserves_encrypted_session(self) -> None:
         vault = MemoryVault(valid_session())
         service = AcidifyProtocolService(Path("."), vault)

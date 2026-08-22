@@ -337,7 +337,12 @@ class AcidifyProtocolService:
 
     def _set_error(self, message: str) -> None:
         with self._lock:
-            self._state = "error"
+            normalized = message.casefold()
+            self._state = (
+                "blocked_signer"
+                if "signer is not configured" in normalized
+                else "error"
+            )
             self._last_error = message[:500]
             self._last_transition_at = _utc_now()
 
@@ -369,6 +374,11 @@ class AcidifyProtocolService:
                 "uin": self._uin,
                 "last_error": self._last_error,
                 "signer_state": "configured" if self.sign_url else "not_configured",
+                "signer_requirement": {
+                    "protocol_version": "9.2.80",
+                    "qua": "V1_AND_SQ_9.2.80_13690_YYB_D",
+                    "ready": bool(self.sign_url),
+                },
                 "session_security": {
                     "password_stored": False,
                     "vault": "windows_dpapi",

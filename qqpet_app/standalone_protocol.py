@@ -96,6 +96,13 @@ class StandaloneProtocolReader:
     def get_self_uin(self) -> str:
         status = self.health()
         state = str(status.get("session_state") or "").casefold()
+        if state == "blocked_signer":
+            requirement = status.get("signer_requirement") or {}
+            version = str(requirement.get("protocol_version") or "9.2.80")
+            raise StandaloneProtocolUnavailable(
+                f"已授权 Android 会话有效，但尚未配置匹配 QQ {version} 的签名服务；"
+                "本次业务指令没有发送"
+            )
         if state in {"offline", "error"}:
             self.reconnect_session()
             status = self.health()

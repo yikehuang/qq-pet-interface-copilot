@@ -2375,12 +2375,15 @@ class MainWindow(tk.Tk):
             label = f"{display}｜QQ {opponent.user_id}｜petId 已确认"
             hire_rows.append((label, opponent))
         hire_rows.sort(key=lambda item: ((item[1].nickname or item[0]).casefold(), item[1].user_id))
-        self.work_hire_friend_options = dict(hire_rows)
-        hire_labels = tuple(label for label, _item in hire_rows)
-        self.work_hire_friend_combo.configure(values=hire_labels)
-        self.test_hire_friend_combo.configure(values=hire_labels)
+        selected_hire = None
         configured_hire_uin = str(
             self.config_store.data["work"].get("hire_friend_uin", "")
+        ).strip()
+        configured_hire_pet_id = str(
+            self.config_store.data["work"].get("hire_friend_pet_id", "")
+        ).strip()
+        configured_hire_name = str(
+            self.config_store.data["work"].get("hire_friend_name", "")
         ).strip()
         selected_hire_uin = previous_hire_uin or configured_hire_uin
         selected_hire = next(
@@ -2389,8 +2392,26 @@ class MainWindow(tk.Tk):
                 for label, opponent in hire_rows
                 if opponent.user_id == selected_hire_uin
             ),
-            next(iter(hire_labels), "当前没有可雇佣的宠物好友"),
+            None,
         )
+        if selected_hire is None and selected_hire_uin and configured_hire_pet_id:
+            saved_label = (
+                f"{configured_hire_name or selected_hire_uin}｜QQ {selected_hire_uin}｜"
+                "已保存宠物 ID"
+            )
+            saved_opponent = PKOpponent(
+                user_id=selected_hire_uin,
+                pet_id=configured_hire_pet_id,
+                nickname=configured_hire_name,
+            )
+            hire_rows.insert(0, (saved_label, saved_opponent))
+            selected_hire = saved_label
+        self.work_hire_friend_options = dict(hire_rows)
+        hire_labels = tuple(label for label, _item in hire_rows)
+        self.work_hire_friend_combo.configure(values=hire_labels)
+        self.test_hire_friend_combo.configure(values=hire_labels)
+        if selected_hire is None:
+            selected_hire = next(iter(hire_labels), "当前没有可雇佣的宠物好友")
         self.work_hire_friend_var.set(selected_hire)
         self.test_hire_friend_var.set(selected_hire)
 

@@ -126,6 +126,22 @@ class StandaloneProtocolTests(unittest.TestCase):
                 reader.get_self_uin()
         request.assert_called_once_with("GET", "/v1/health")
 
+    def test_missing_signer_is_reported_without_reconnect_or_business_request(self) -> None:
+        reader = StandaloneProtocolReader("http://127.0.0.1:17890")
+        with patch.object(
+            reader,
+            "_request",
+            return_value={
+                "ok": True,
+                "protocol_family": "android_qq",
+                "session_state": "blocked_signer",
+                "signer_requirement": {"protocol_version": "9.2.80"},
+            },
+        ) as request:
+            with self.assertRaisesRegex(StandaloneProtocolUnavailable, "匹配 QQ 9.2.80"):
+                reader.get_self_uin()
+        request.assert_called_once_with("GET", "/v1/health")
+
     def test_qr_request_stops_when_mobile_backend_reports_it_unavailable(self) -> None:
         reader = StandaloneProtocolReader("http://127.0.0.1:17890")
         with patch.object(
