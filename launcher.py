@@ -323,6 +323,14 @@ class Launcher(tk.Tk):
                     "但登录/签名核心尚未通过只读验证，不能用 MuMu 或桌面 QQ 冒充。"
                 )
         if str(status.get("session_state") or "").casefold() != "online":
+            capabilities = status.get("login_capabilities")
+            if isinstance(capabilities, dict) and capabilities.get("qr") is False:
+                help_text = str(status.get("login_help") or "").strip()
+                raise RuntimeError(
+                    "纯电脑协议核心已启动，但手机版登录尚未就绪。"
+                    + (f"{help_text}。" if help_text else "")
+                    + "程序不会改用电脑版 QQ，也不会要求启动 MuMu。"
+                )
             self.events.put(("log", "请使用手机 QQ 扫描登录二维码……"))
             self.events.put(("login_qr", reader.request_login_qr()))
             for _ in range(120):

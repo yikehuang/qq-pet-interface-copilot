@@ -94,6 +94,12 @@ class StandaloneProtocolReader:
         return uin
 
     def request_login_qr(self) -> bytes:
+        status = self.health()
+        capabilities = status.get("login_capabilities")
+        if isinstance(capabilities, dict) and capabilities.get("qr") is False:
+            help_text = str(status.get("login_help") or "").strip()
+            detail = f"：{help_text}" if help_text else ""
+            raise StandaloneProtocolUnavailable(f"纯电脑手机版二维码登录当前不可用{detail}")
         result = self._request("POST", "/v1/login/qr", {})
         encoded = str(result.get("image_base64") or "")
         try:

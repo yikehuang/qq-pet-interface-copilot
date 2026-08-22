@@ -39,6 +39,7 @@ type host struct {
 	signer      *signerClient
 	writes      bool
 	androidID   string
+	legacyQR    bool
 }
 
 type oidbRequest struct {
@@ -57,6 +58,7 @@ func main() {
 	androidID := flag.String("android-id", os.Getenv("QQPET_ANDROID_ID"), "Android ID shared with the local qsign runtime")
 	protocolJSON := flag.String("protocol-json", os.Getenv("QQPET_PROTOCOL_JSON"), "Android QQ protocol descriptor matching qsign")
 	enableWrites := flag.Bool("enable-writes", false, "enable allow-listed state-changing OIDB calls")
+	enableLegacyQR := flag.Bool("enable-legacy-qr", false, "research only: enable the obsolete MiraiGo Android QR flow")
 	flag.Parse()
 	if strings.TrimSpace(*protocolJSON) != "" {
 		data, err := os.ReadFile(*protocolJSON)
@@ -82,6 +84,7 @@ func main() {
 		signer:      signer,
 		writes:      *enableWrites,
 		androidID:   strings.TrimSpace(*androidID),
+		legacyQR:    *enableLegacyQR,
 	}
 	h.restoreSessionAsync()
 	mux := http.NewServeMux()
@@ -172,10 +175,21 @@ func (h *host) health(w http.ResponseWriter, _ *http.Request) {
 		"last_error":       lastError,
 		"writes_enabled":   h.writes,
 		"android_id":       h.androidID,
+		"login_capabilities": map[string]bool{
+			"qr":              h.legacyQR,
+			"password":        false,
+			"session_restore": true,
+		},
+		"login_backend": "mirai_go_legacy",
+		"login_help":    "旧式 Android 二维码已被 QQ 登录服务器拒绝；需要接入当前 Android 登录和签名实现",
 	})
 }
 
 func (h *host) loginQR(w http.ResponseWriter, _ *http.Request) {
+	if !h.legacyQR {
+		writeError(w, http.StatusNotImplemented, "mobile_qr_unavailable", "旧式 Android 二维码登录已停用；当前服务器会拒绝该请求")
+		return
+	}
 	h.mu.RLock()
 	if h.client != nil && h.client.Online.Load() {
 		h.mu.RUnlock()

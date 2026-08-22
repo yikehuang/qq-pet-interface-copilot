@@ -65,6 +65,23 @@ class StandaloneProtocolTests(unittest.TestCase):
         config["connection"]["mode"] = "legacy_mobile_bridge"
         self.assertIsNone(reader_from_config(config))
 
+    def test_qr_request_stops_when_mobile_backend_reports_it_unavailable(self) -> None:
+        reader = StandaloneProtocolReader("http://127.0.0.1:17890")
+        with patch.object(
+            reader,
+            "_request",
+            return_value={
+                "ok": True,
+                "protocol_family": "android_qq",
+                "session_state": "offline",
+                "login_capabilities": {"qr": False},
+                "login_help": "需要新的 Android 登录实现",
+            },
+        ) as request:
+            with self.assertRaisesRegex(StandaloneProtocolUnavailable, "二维码登录当前不可用"):
+                reader.request_login_qr()
+        request.assert_called_once_with("GET", "/v1/health")
+
 
 if __name__ == "__main__":
     unittest.main()
