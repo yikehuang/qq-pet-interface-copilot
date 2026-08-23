@@ -23,6 +23,7 @@ NAPCAT_CONFIG_RELATIVE = Path("runtime") / "NapCatQQ" / "config"
 NAPCAT_DIRECT_CONFIG_RELATIVE = Path("napcat") / "config"
 DEFAULT_ONEBOT_PORT = 6201
 VC_RUNTIME_URL = "https://aka.ms/vc14/vc_redist.x64.exe"
+MANAGED_RUNTIME_QQ_DLLS = ("crypto.dll", "ssl.dll")
 
 
 @dataclass(frozen=True)
@@ -229,21 +230,43 @@ def _registry_qq_paths() -> Iterable[Path]:
     except ImportError:
         return ()
     roots = (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER)
-    keys = (
-        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\QQ",
-        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\QQ",
+    uninstall_keys = (
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
     )
     found: list[Path] = []
     for root in roots:
-        for key_name in keys:
+        for uninstall_key in uninstall_keys:
             try:
-                with winreg.OpenKey(root, key_name) as key:
-                    value, _ = winreg.QueryValueEx(key, "UninstallString")
+                parent = winreg.OpenKey(root, uninstall_key)
             except OSError:
                 continue
-            raw = str(value).strip().strip('"')
-            parent = Path(raw).parent
-            found.extend((parent / "QQ.exe", parent.parent / "QQ.exe"))
+            with parent:
+                for index in range(winreg.QueryInfoKey(parent)[0]):
+                    try:
+                        name = winreg.EnumKey(parent, index)
+                        with winreg.OpenKey(parent, name) as key:
+                            display_name, _ = winreg.QueryValueEx(key, "DisplayName")
+                            if str(display_name).strip() not in {"QQ", "腾讯QQ"}:
+                                continue
+                            values: list[str] = []
+                            for value_name in ("DisplayIcon", "InstallLocation", "UninstallString"):
+                                try:
+                                    value, _ = winreg.QueryValueEx(key, value_name)
+                                    values.append(str(value))
+                                except OSError:
+                                    pass
+                    except OSError:
+                        continue
+                    for value in values:
+                        raw = value.strip().strip('"').split(",", 1)[0].strip('"')
+                        path = Path(raw)
+                        if path.name.lower() == "qq.exe":
+                            found.append(path)
+                        elif path.suffix.lower() == ".exe":
+                            found.extend((path.parent / "QQ.exe", path.parent.parent / "QQ.exe"))
+                        else:
+                            found.append(path / "QQ.exe")
     return tuple(found)
 
 
@@ -262,6 +285,37 @@ def find_qq_path() -> Path | None:
         if path.is_file():
             return path.resolve()
     return None
+
+
+def repair_managed_runtime_dependencies(
+    root: Path, qq_path: Path | None = None
+) -> tuple[Path, ...]:
+    """Restore QQ native DLLs omitted by some NapCat Node release archives."""
+    missing = [name for name in MANAGED_RUNTIME_QQ_DLLS if not (root / name).is_file()]
+    if not missing:
+        return ()
+    qq = qq_path or find_qq_path()
+    if not qq or not qq.is_file():
+        raise RuntimeError(
+            "NapCat 运行包缺少 crypto.dll/ssl.dll，且未找到新版 QQ 用于自动修复"
+        )
+    versions = qq.parent / "versions"
+    version_roots = sorted(
+        (path for path in versions.iterdir() if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    ) if versions.is_dir() else []
+    search_roots = [qq.parent / "resources" / "app"]
+    search_roots.extend(path / "resources" / "app" for path in version_roots)
+    copied: list[Path] = []
+    for name in missing:
+        source = next((path / name for path in search_roots if (path / name).is_file()), None)
+        if source is None:
+            raise RuntimeError(f"NapCat 运行包缺少 {name}，新版 QQ 目录中也未找到该文件")
+        target = root / name
+        shutil.copy2(source, target)
+        copied.append(target)
+    return tuple(copied)
 
 
 def vc_runtime_installed() -> bool:
@@ -447,6 +501,7 @@ def start_napcat(
         raise RuntimeError("尚未安装 NapCat 运行环境")
     creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     if is_managed_runtime(root):
+        repair_managed_runtime_dependencies(root, qq_path)
         command = [str(root / "node.exe"), str(root / "index.js")]
         if uin.isdigit():
             command.extend(("-q", uin))
