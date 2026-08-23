@@ -488,7 +488,12 @@ class Scheduler:
         now = now or datetime.now()
         counts = self.progress.snapshot()["counts"]
         adventure = config["adventure"]
-        due = now.strftime("%H:%M") >= adventure["start_time"]
+        prerequisite_enabled = bool(adventure.get("prerequisite_enabled", False))
+        prerequisite_action = self._adventure_prerequisite_action(config)
+        if prerequisite_enabled:
+            due = prerequisite_action is None
+        else:
+            due = now.strftime("%H:%M") >= adventure["start_time"]
         adventure_limited = bool(adventure.get("limit_enabled", False))
         adventure_limit = int(adventure.get("times_per_day", 0))
         if adventure["enabled"] and due and (
@@ -496,11 +501,26 @@ class Scheduler:
         ):
             return "adventure"
 
+        if prerequisite_action is not None:
+            return prerequisite_action
+
         if values.gold >= float(config["scheduler"]["coin_threshold"]):
             if self._under_limit(config, counts, "school"):
                 return "school"
             return "work" if self._under_limit(config, counts, "work") else None
         return "work" if self._under_limit(config, counts, "work") else None
+
+    def _adventure_prerequisite_action(self, config: dict) -> str | None:
+        adventure = config.get("adventure", {})
+        if not bool(adventure.get("prerequisite_enabled", False)):
+            return None
+        school_required = max(0, int(adventure.get("school_minutes_required", 0) or 0))
+        work_required = max(0, int(adventure.get("work_minutes_required", 0) or 0))
+        if self.progress.activity_minutes("school") < school_required:
+            return "school" if config.get("school", {}).get("enabled", True) else None
+        if self.progress.activity_minutes("work") < work_required:
+            return "work" if config.get("work", {}).get("enabled", True) else None
+        return None
 
     def _adaptive_decision(
         self, client: NapCatClient, config: dict, values: PetValues
@@ -624,7 +644,8 @@ class Scheduler:
                 and self._recall_lower_reward_adventure(client, config, story, pending)
             ):
                 return True
-            if story.recallable and not pending:
+            employed_story = self._is_employed_story(story.story_id)
+            if story.recallable and (employed_story or not pending):
                 mode = str(config["story"].get("employed_recall_mode", "best_split"))
                 progress = (
                     story.elapsed_seconds / story.duration_seconds
@@ -651,6 +672,14 @@ class Scheduler:
                         f"被雇佣任务已按“{strategy}”召回、服务器验证并计数；"
                         f"今日被雇佣召回 {count} 次"
                     )
+                return True
+
+            if employed_story:
+                self.activity("检测到被雇佣任务，等待召回条件")
+                self.log(
+                    f"检测到服务器被雇佣任务 storyId={story.story_id}；"
+                    "忽略本地自主打工记录，等待服务器开放召回"
+                )
                 return True
 
             if not pending:
@@ -851,6 +880,10 @@ class Scheduler:
     def _story_kind(story_id: str) -> str | None:
         prefix = story_id.split("_", 1)[0]
         return {"6100": "school", "6400": "work", "6700": "adventure"}.get(prefix)
+
+    @staticmethod
+    def _is_employed_story(story_id: str) -> bool:
+        return str(story_id or "").split("_", 1)[0] == "6500"
 
     def _care_blocked(self, kind: str) -> bool:
         block = self.progress.active_care_block(kind)
@@ -1729,9 +1762,16 @@ class Scheduler:
 
         action = self.decide(config, values)
         adaptive: AdaptiveDecision | None = preview_adaptive
+        prerequisite_action = self._adventure_prerequisite_action(config)
+        if prerequisite_action is not None:
+            action = prerequisite_action
         # Adventure keeps its configured priority. School/work are selected by
         # the resource-aware planner whenever optimization is enabled.
-        if action != "adventure" and config.get("optimization", {}).get("enabled", False):
+        if (
+            action != "adventure"
+            and prerequisite_action is None
+            and config.get("optimization", {}).get("enabled", False)
+        ):
             try:
                 if adaptive is None:
                     adaptive = self._adaptive_decision(client, config, values)

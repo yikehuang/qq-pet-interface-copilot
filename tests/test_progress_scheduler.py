@@ -678,6 +678,54 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(fake.settled, ["6500_employed"])
             self.assertEqual(scheduler.progress.count("employed"), 1)
 
+    def test_adventure_waits_for_school_and_work_minutes(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"].update(
+                {
+                    "prerequisite_enabled": True,
+                    "school_minutes_required": 240,
+                    "work_minutes_required": 240,
+                    "start_time": "00:00",
+                }
+            )
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            values = PetValues(gold=1000, hunger=100, clean=100)
+            self.assertEqual(scheduler.decide(config, values), "school")
+            scheduler.progress.record_activity_minutes("school", 240)
+            self.assertEqual(scheduler.decide(config, values), "work")
+            scheduler.progress.record_activity_minutes("work", 240)
+            self.assertEqual(scheduler.decide(config, values), "adventure")
+
+    def test_employed_story_wins_over_stale_self_work_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["story"]["employed_recall_mode"] = "immediate"
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            scheduler.progress.set_pending("work", confirmed=True, story_id="6400_old")
+
+            class FakeClient:
+                settled = []
+
+                def settle_story(self, story_id):
+                    self.settled.append(story_id)
+                    return OidbResponse(38752, 1, 0, b"verified", b"raw")
+
+            fake = FakeClient()
+            story = StoryStatus(
+                "6500_friend_hired", 51, remaining_seconds=99, duration_seconds=100, recallable=True
+            )
+            self.assertTrue(scheduler._handle_story(fake, config, story))
+            self.assertEqual(fake.settled, ["6500_friend_hired"])
+            self.assertEqual(scheduler.progress.count("employed"), 1)
+
     def test_failure_alert_threshold_and_recovery_are_deduplicated(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

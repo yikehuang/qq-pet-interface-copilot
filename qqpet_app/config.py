@@ -89,6 +89,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "limit_enabled": False,
         "start_time": "20:00",
         "times_per_day": 0,
+        "prerequisite_enabled": False,
+        "school_minutes_required": 240,
+        "work_minutes_required": 240,
     },
     "pk": {
         "enabled": False,
@@ -338,6 +341,9 @@ class ConfigStore:
             raise ValueError("adventure.times_per_day 不能小于 0")
         if config["adventure"].get("limit_enabled") and adventure_limit <= 0:
             raise ValueError("启用每日冒险次数限制后，冒险次数必须大于 0")
+        for key in ("school_minutes_required", "work_minutes_required"):
+            if int(config["adventure"].get(key, 0) or 0) < 0:
+                raise ValueError(f"adventure.{key} 不能小于 0")
         hours, minutes = map(int, str(config["adventure"]["start_time"]).split(":"))
         if not (0 <= hours <= 23 and 0 <= minutes <= 59):
             raise ValueError("adventure.start_time 必须是 HH:MM")

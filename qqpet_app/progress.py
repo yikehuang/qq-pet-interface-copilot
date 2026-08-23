@@ -40,6 +40,7 @@ class DailyProgress:
                 "settled_story_ids": [],
                 "encouraged_story_ids": [],
                 "optimizer": {"active_minutes": 0, "opening_gold": None},
+                "activity_minutes": {"school": 0, "work": 0},
                 "economy_profile": {},
                 "work_hire_unavailable_uins": [],
             }
@@ -57,6 +58,7 @@ class DailyProgress:
                 "settled_story_ids": [],
                 "encouraged_story_ids": [],
                 "optimizer": {"active_minutes": 0, "opening_gold": None},
+                "activity_minutes": {"school": 0, "work": 0},
                 "economy_profile": {},
                 "work_hire_unavailable_uins": [],
             }
@@ -66,6 +68,11 @@ class DailyProgress:
         loaded.setdefault("settled_story_ids", [])
         loaded.setdefault("encouraged_story_ids", [])
         loaded.setdefault("optimizer", {"active_minutes": 0, "opening_gold": None})
+        loaded.setdefault("activity_minutes", {"school": 0, "work": 0})
+        loaded["activity_minutes"] = {
+            "school": int(loaded["activity_minutes"].get("school", 0) or 0),
+            "work": int(loaded["activity_minutes"].get("work", 0) or 0),
+        }
         loaded.setdefault("economy_profile", {})
         loaded.setdefault("work_hire_unavailable_uins", [])
         loaded["counts"] = {**EMPTY_COUNTS, **loaded.get("counts", {})}
@@ -99,6 +106,7 @@ class DailyProgress:
                     "settled_story_ids": [],
                     "encouraged_story_ids": [],
                     "optimizer": {"active_minutes": 0, "opening_gold": None},
+                    "activity_minutes": {"school": 0, "work": 0},
                     "work_hire_unavailable_uins": [],
                 }
             )
@@ -181,8 +189,17 @@ class DailyProgress:
                 "optimizer", {"active_minutes": 0, "opening_gold": None}
             )
             optimizer["active_minutes"] = int(optimizer.get("active_minutes", 0)) + int(minutes)
+            activity_minutes = self._state.setdefault(
+                "activity_minutes", {"school": 0, "work": 0}
+            )
+            activity_minutes[kind] = int(activity_minutes.get(kind, 0)) + int(minutes)
             self._save()
             return int(optimizer["active_minutes"])
+
+    def activity_minutes(self, kind: str) -> int:
+        if kind not in {"school", "work"}:
+            return 0
+        return int(self.snapshot().get("activity_minutes", {}).get(kind, 0) or 0)
 
     def work_hire_unavailable_uins(self) -> set[str]:
         return {
