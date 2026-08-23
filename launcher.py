@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import queue
 import os
 import subprocess
@@ -8,6 +9,9 @@ import sys
 import threading
 import time
 import tkinter as tk
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -16,6 +20,7 @@ from qqpet_app.acidify_host import (
     default_vault,
     export_android_session,
     import_android_session,
+    sanitize_android_session,
 )
 from qqpet_app.bootstrap import ensure_vc_runtime
 from qqpet_app.config import ConfigStore
@@ -67,6 +72,61 @@ def automatic_android_session_export_path(uin: str, now: float | None = None) ->
         )
         suffix += 1
     return destination
+
+
+def latest_android_session_file(directory: Path | None = None) -> Path | None:
+    """Find the newest exported session without opening or importing it."""
+    root = directory or ANDROID_SESSION_EXPORT_DIR
+    if not root.is_dir():
+        return None
+    files = [path for path in root.glob("*.json") if path.is_file()]
+    return max(files, key=lambda path: path.stat().st_mtime_ns) if files else None
+
+
+def load_android_session_file(path: Path) -> tuple[Path, dict]:
+    """Read and validate a local session before sending it to the host."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"无法读取 Android 会话 JSON：{path}") from exc
+    try:
+        return path, sanitize_android_session(value)
+    except Exception as exc:
+        raise RuntimeError(f"最新 Android 会话无效：{path.name}；{exc}") from exc
+
+
+def configured_signer_url(settings: dict) -> str:
+    """Resolve only an explicitly configured local signer endpoint."""
+    value = str(settings.get("sign_url") or os.environ.get("QQPET_ANDROID_SIGN_URL") or "").strip()
+    if not value:
+        return ""
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in {"http", "https"} or (parsed.hostname or "").casefold() not in {
+        "127.0.0.1", "localhost", "::1"
+    }:
+        raise RuntimeError("Android signer 只能使用本机回环地址")
+    if parsed.port == 17891:
+        raise RuntimeError("17891 是网页授权页地址，不是 Android signer 地址")
+    return value.rstrip("/")
+
+
+def post_local_json(endpoint: str, path: str, payload: dict, timeout: float = 10) -> dict:
+    """Call a local protocol API and return its JSON object response."""
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint.rstrip("/") + path,
+        data=body,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("无法调用本机纯电脑协议服务") from exc
+    if not isinstance(result, dict) or result.get("ok") is False:
+        raise RuntimeError(str(result.get("message") if isinstance(result, dict) else "协议服务返回格式错误"))
+    return result
 def console_process_spec(
     frozen: bool | None = None, profile: str = ""
 ) -> tuple[list[str], dict[str, str]]:
@@ -414,6 +474,7 @@ class Launcher(tk.Tk):
     def _connect_standalone(self, config: dict, preferred_uin: str, pet_id: str) -> None:
         self.events.put(("log", "正在连接纯电脑 Android QQ 协议服务……"))
         settings = config["standalone_protocol"]
+        sign_url = configured_signer_url(settings)
         executable = str(settings.get("host_executable") or "").strip()
         host_path = Path(executable) if executable else None
         reader = standalone_reader_from_config(config)
@@ -429,10 +490,12 @@ class Launcher(tk.Tk):
                     if not host_path.is_file():
                         raise RuntimeError("手动指定的协议服务程序不存在")
                     command, environment = [str(host_path)], os.environ.copy()
+                    if sign_url:
+                        environment["QQPET_ANDROID_SIGN_URL"] = sign_url
                     working_directory = host_path.parent
                 else:
                     command, environment = acidify_host_process_spec(
-                        sign_url=str(settings.get("sign_url") or "")
+                        sign_url=sign_url
                     )
                     working_directory = ROOT
                 subprocess.Popen(
@@ -457,7 +520,40 @@ class Launcher(tk.Tk):
                     "纯电脑协议核心尚未安装。当前 2.0 分支已经完成助手侧接入，"
                     "但登录/签名核心尚未通过只读验证，不能用 MuMu 或桌面 QQ 冒充。"
                 )
-        if str(status.get("session_state") or "").casefold() != "online":
+        state = str(status.get("session_state") or "").casefold()
+        if state == "blocked_signer":
+            requirement = status.get("signer_requirement") or {}
+            version = str(requirement.get("protocol_version") or "9.2.80")
+            raise RuntimeError(
+                f"Android QQ {version} signer 未就绪；请配置明确匹配该版本的本机 signer，"
+                "启动器不会使用不匹配的旧版 qsign。"
+            )
+        if state in {"needs_session_import", "offline", "error"}:
+            session_path = latest_android_session_file()
+            if session_path is None:
+                raise RuntimeError(
+                    "没有找到已导出的 Android 会话 JSON；请先导出到 Downloads\\QQPetInterfaceCopilot\\android-sessions"
+                )
+            _, session = load_android_session_file(session_path)
+            session_uin = str(session["uin"])
+            current_uin = str(status.get("uin") or "")
+            expected_uin = preferred_uin or current_uin
+            if expected_uin and expected_uin != session_uin:
+                raise RuntimeError(
+                    f"最新会话属于 QQ {session_uin}，但当前纯电脑配置是 QQ {expected_uin}；"
+                    "为防止串号，未自动导入。"
+                )
+            self.events.put(("log", f"正在自动导入最新 Android 会话：QQ {session_uin}。"))
+            post_local_json(reader.endpoint, "/v1/session/import", {"session": session})
+            status = reader.health()
+            state = str(status.get("session_state") or "").casefold()
+        if state == "blocked_signer":
+            requirement = status.get("signer_requirement") or {}
+            version = str(requirement.get("protocol_version") or "9.2.80")
+            raise RuntimeError(
+                f"Android QQ {version} signer 未就绪；会话已保留但未发送业务请求。"
+            )
+        if state != "online":
             capabilities = status.get("login_capabilities")
             if isinstance(capabilities, dict) and capabilities.get("qr") is False:
                 help_text = str(status.get("login_help") or "").strip()

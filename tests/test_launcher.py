@@ -79,6 +79,33 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(command, [launcher.sys.executable, "--acidify-host"])
         self.assertEqual(environment["PYINSTALLER_RESET_ENVIRONMENT"], "1")
 
+    def test_latest_android_session_file_selects_newest_json(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            older = root / "older.json"
+            newer = root / "newer.json"
+            older.write_text("{}", encoding="utf-8")
+            newer.write_text("{}", encoding="utf-8")
+            older.touch()
+            newer.touch()
+            newer_mtime = older.stat().st_mtime_ns + 2_000_000
+            import os
+            os.utime(newer, ns=(newer_mtime, newer_mtime))
+            self.assertEqual(launcher.latest_android_session_file(root), newer)
+
+    def test_latest_android_session_file_returns_none_for_missing_directory(self) -> None:
+        self.assertIsNone(launcher.latest_android_session_file(Path("does-not-exist")))
+
+    def test_configured_signer_rejects_web_auth_port_and_public_hosts(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "网页授权页"):
+            launcher.configured_signer_url({"sign_url": "http://127.0.0.1:17891"})
+        with self.assertRaisesRegex(RuntimeError, "回环地址"):
+            launcher.configured_signer_url({"sign_url": "https://example.invalid/sign"})
+
+    def test_configured_signer_accepts_explicit_loopback_url(self) -> None:
+        value = launcher.configured_signer_url({"sign_url": "http://127.0.0.1:9000/sign/"})
+        self.assertEqual(value, "http://127.0.0.1:9000/sign")
+
 
 if __name__ == "__main__":
     unittest.main()
