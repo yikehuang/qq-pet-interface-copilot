@@ -41,7 +41,9 @@ from qqpet_app.updater import (
 )
 
 
-CONFIG_PATH = config_path()
+# Keep the legacy launcher on the root config while allowing the isolated
+# authorized-session launcher to select profiles/standalone explicitly.
+CONFIG_PATH = config_path(os.environ.get("QQPET_PROFILE", ""))
 DOWNLOAD_DIR = (
     Path(os.environ.get("LOCALAPPDATA") or ROOT)
     / "QQPetInterfaceCopilot"
