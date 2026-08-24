@@ -64,7 +64,7 @@ def save_manual_connection(store: ConfigStore, adb_path: str, adb_serial: str) -
     """Persist launcher connection overrides; blank values keep auto discovery."""
     path_text = os.path.expandvars(adb_path.strip().strip('"'))
     if path_text and not Path(path_text).is_file():
-        raise ValueError("手动指定的 ADB 程序不存在，请选择 MuMu 目录中的 adb.exe")
+        raise ValueError("手动指定的 ADB 程序不存在，请选择模拟器目录中的 adb")
     serial = adb_serial.strip()
     if serial and not (
         serial.startswith("emulator-")
@@ -126,7 +126,11 @@ class Launcher(tk.Tk):
         )
         ttk.Label(
             connection,
-            text="示例：ADB 程序选择 …\\MuMu Player 12\\nx_main\\adb.exe；连接地址填写 127.0.0.1:16384",
+            text=(
+                "示例：ADB 程序选择 …\\MuMu Player 12\\nx_main\\adb.exe；连接地址填写 127.0.0.1:16384"
+                if sys.platform == "win32"
+                else "macOS：ADB 程序留空自动识别 MuMu 模拟器 Pro；连接地址填写 127.0.0.1:5555"
+            ),
             foreground="#666",
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(5, 0))
 
@@ -161,10 +165,13 @@ class Launcher(tk.Tk):
         threading.Thread(target=target, daemon=True).start()
 
     def _browse_adb(self) -> None:
-        selected = filedialog.askopenfilename(
-            title="选择 MuMu 的 adb.exe",
-            filetypes=(("ADB 程序", "adb.exe"), ("可执行程序", "*.exe")),
-        )
+        if sys.platform == "win32":
+            filetypes = (("ADB 程序", "adb.exe"), ("可执行程序", "*.exe"))
+            title = "选择 MuMu 的 adb.exe"
+        else:
+            filetypes = (("ADB 程序", "adb"), ("所有文件", "*"))
+            title = "选择 adb"
+        selected = filedialog.askopenfilename(title=title, filetypes=filetypes)
         if selected:
             self.adb_path_var.set(selected)
 

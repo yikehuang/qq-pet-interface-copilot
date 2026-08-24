@@ -38,13 +38,10 @@ from qqpet_app.updater import (
     schedule_windows_install,
 )
 from qqpet_app.single_instance import SingleInstance
+from qqpet_app.mobile_protocol import default_project_root
 
 
-ROOT = (
-    Path(sys.executable).resolve().parent
-    if getattr(sys, "frozen", False)
-    else Path(__file__).resolve().parent
-)
+ROOT = default_project_root()
 CONFIG_PATH = ROOT / "config.yaml"
 PROGRESS_PATH = ROOT / "runs" / "daily_progress.json"
 LOG_DIR = ROOT / "runs" / "logs"
@@ -1752,6 +1749,30 @@ class MainWindow(tk.Tk):
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
 
+    def _open_pet_page(self) -> None:
+        """在模拟器里打开 QQ 宠物主页（仅供查看，不影响调度）。"""
+
+        def worker() -> None:
+            try:
+                from qqpet_app.mobile_protocol import reader_from_config
+
+                reader = reader_from_config(self.config_store.data)
+                if reader is None:
+                    self.events.put(
+                        ("log", f"[{datetime.now():%H:%M:%S}] 手机 QQ 协议未启用，无法打开宠物主页")
+                    )
+                    return
+                reader.open_pet_page()
+                self.events.put(
+                    ("log", f"[{datetime.now():%H:%M:%S}] 已在模拟器中打开 QQ 宠物主页")
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.events.put(
+                    ("log", f"[{datetime.now():%H:%M:%S}] 打开宠物主页失败：{exc}")
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _probe_connection(self) -> None:
         """Report QQ session health independently from pet business reads."""
 
@@ -2454,6 +2475,15 @@ class MainWindow(tk.Tk):
                     self.pet_id_lookup_button.configure(state=tk.NORMAL)
                 elif kind == "status":
                     values, story, state = payload
+                    # 供菜单栏显示「当前动作」（学习中/打工中/冒险中/空闲）
+                    kind = (
+                        Scheduler._story_kind(story.story_id)
+                        if (story is not None and story.story_id)
+                        else None
+                    )
+                    self._current_action = {
+                        "school": "学习中", "work": "打工中", "adventure": "冒险中",
+                    }.get(kind, "空闲")
                     self.status_vars["connection"].set("已连接")
                     self.hero_connection_label.configure(
                         background="#e1f7ee", foreground="#187d53"
@@ -2872,7 +2902,12 @@ class MainWindow(tk.Tk):
         self.destroy()
 
 
-if __name__ == "__main__":
+def run_console() -> None:
+    """启动完整控制台 GUI。
+
+    macOS 打包版（或显式传 --menubar）默认后台运行：菜单栏图标 + 自动开始调度 +
+    主窗口隐藏；关闭主窗口返回后台。其它平台/源码运行保持原行为（显示窗口、手动启动）。
+    """
     instance = SingleInstance(ROOT / "runs" / ".console.lock")
     if not instance.acquire():
         popup = tk.Tk()
@@ -2881,6 +2916,20 @@ if __name__ == "__main__":
         popup.destroy()
         raise SystemExit(0)
     try:
-        MainWindow(auto_start="--autostart" in sys.argv[1:]).mainloop()
+        use_menubar = sys.platform == "darwin" and (
+            getattr(sys, "frozen", False) or "--menubar" in sys.argv
+        )
+        auto_start = use_menubar or "--autostart" in sys.argv[1:]
+        win = MainWindow(auto_start=auto_start)
+        if use_menubar:
+            from menubar_integration import attach_menubar
+
+            globals()["_menubar_controller"] = attach_menubar(win)
+            win.withdraw()  # 默认后台（不显示主窗口）
+        win.mainloop()
     finally:
         instance.release()
+
+
+if __name__ == "__main__":
+    run_console()
