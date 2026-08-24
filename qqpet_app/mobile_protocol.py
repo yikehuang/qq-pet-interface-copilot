@@ -4,6 +4,7 @@ import hashlib
 import io
 import lzma
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,10 @@ _READER_CACHE_LOCK = threading.Lock()
 
 FRIDA_VERSION = "17.16.4"
 FRIDA_TOOLS_VERSION = "14.10.4"
+# frida-server 默认监听端口（frida 官方默认）。若该端口已被其他版本的
+# frida-server 占用（例如同类工具 qq-pet-copilot 注入的 17.17.0），自动改用备用端口。
+FRIDA_PORT = 27042
+FRIDA_ALT_PORT = 27043
 FRIDA_JAVA_BRIDGE_SHA256 = "02cb922b7fea29a566bd9ae4a190fad24c503076f2497af5706d117033de6a0e"
 FRIDA_TOOLS_SDIST_SHA256 = "7a2c544b545d095040fffbd3768a287a426343dad89095b4a24f4b20382d926a"
 FRIDA_TOOLS_SDIST_URL = (
@@ -133,6 +138,19 @@ def discover_adb_path(project_root: str | Path, configured: str | Path = "") -> 
             root / "references" / "qq-pet-copilot" / "scrcpy-win64" / "adb.exe",
         )
     )
+    if sys.platform == "darwin":
+        # macOS：MuMu 模拟器 Pro 自带 adb 优先，其次 Homebrew / Android SDK
+        candidates.extend(
+            (
+                Path(
+                    "/Applications/MuMuPlayer.app/Contents/MacOS/"
+                    "MuMuEmulator.app/Contents/MacOS/tools/adb"
+                ),
+                Path("/opt/homebrew/bin/adb"),
+                Path("/usr/local/bin/adb"),
+                Path("~/Library/Android/sdk/platform-tools/adb").expanduser(),
+            )
+        )
     for location in _mumu_install_locations():
         candidates.extend(
             (
@@ -174,9 +192,57 @@ def select_adb_serial(output: str, preferred: str = "") -> str:
     )[0]
 
 
+def discover_mumu_macos_serial(adb_path: str | Path) -> str:
+    """探测 MuMu 模拟器当前 adb 端口（macOS 专用）。
+
+    MuMu Mac 的 adb 端口随实例重启而动态变化（实测出现过 5555 / 16448 /
+    16449 等，且同一实例可能同时监听多个端口）。这里扫描 MuMuEmulator
+    进程监听的 TCP 端口，逐个尝试 adb connect，返回第一个能连上且状态为
+    device 的 serial；失败返回空串（非 macOS 也返回空串）。
+    """
+    if sys.platform != "darwin":
+        return ""
+    try:
+        listing = subprocess.run(
+            ["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    ports: list[int] = []
+    for line in listing.splitlines():
+        # lsof 的 COMMAND 列默认截断到 9 字符，MuMuEmulator 显示为 "MuMuEmula"
+        if "MuMuEmu" not in line:
+            continue
+        match = re.search(r":(\d+)\s+\(LISTEN\)", line)
+        if match:
+            ports.append(int(match.group(1)))
+    flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    for port in sorted(set(ports)):
+        serial = f"127.0.0.1:{port}"
+        try:
+            subprocess.run(
+                [str(adb_path), "connect", serial],
+                capture_output=True, timeout=8, **flags,
+            )
+            state = subprocess.run(
+                [str(adb_path), "-s", serial, "get-state"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=8, **flags,
+            ).stdout.strip()
+            if state == "device":
+                return serial
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return ""
+
+
 def frida_architecture(uname_machine: str) -> str:
     value = uname_machine.strip().lower()
-    if value in {"aarch64", "arm64"}:
+    # getprop ro.product.cpu.abi 常见值：arm64-v8a / x86_64 / x86；
+    # uname -m 值：aarch64 / arm64 / x86_64 / amd64
+    if value.startswith("arm64") or value in {"aarch64"}:
         return "arm64"
     if value in {"x86_64", "amd64"}:
         return "x86_64"
@@ -249,7 +315,7 @@ class MobileProtocolReader:
     def __init__(
         self,
         project_root: str | Path,
-        endpoint: str = "127.0.0.1:27042",
+        endpoint: str = f"127.0.0.1:{FRIDA_PORT}",
         process_name: str = "com.tencent.mobileqq",
         adb_path: str | Path = "",
         adb_serial: str = "127.0.0.1:16416",
@@ -259,6 +325,8 @@ class MobileProtocolReader:
         self.process_name = process_name
         self.adb_path = Path(adb_path) if adb_path else None
         self.adb_serial = adb_serial
+        # 实际使用的 frida-server 端口：默认 FRIDA_PORT，检测到被占用时切到备用端口。
+        self.frida_port = FRIDA_PORT
         self._lock = threading.RLock()
         self._session: Any = None
         self._script: Any = None
@@ -325,11 +393,14 @@ class MobileProtocolReader:
         return raw.decode("utf-8")
 
     def _load_or_repair_java_bridge(self, bundled_root: Path) -> str:
-        component_root = (
-            Path(os.environ.get("LOCALAPPDATA") or self.project_root)
-            / "QQPetInterfaceCopilot"
-            / "components"
-        )
+        # 缓存目录按平台惯例选，避免 macOS/Linux 上落到项目根目录污染源码树
+        if sys.platform == "darwin":
+            cache_base = Path.home() / "Library" / "Caches"
+        elif os.name == "nt":
+            cache_base = Path(os.environ.get("LOCALAPPDATA") or self.project_root)
+        else:
+            cache_base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
+        component_root = cache_base / "QQPetInterfaceCopilot" / "components"
         cached = component_root / f"frida-java-bridge-{FRIDA_TOOLS_VERSION}.js"
         candidates = [
             self.project_root / "tools" / "py312frida" / "frida_tools" / "bridges" / "java.js",
@@ -387,7 +458,7 @@ class MobileProtocolReader:
 
     def _resolve_device(self) -> str:
         if not self.adb_path or not self.adb_path.is_file():
-            raise MobileProtocolUnavailable("未找到 MuMu 模拟器的 ADB，请确认 MuMu 12 已正确安装")
+            raise MobileProtocolUnavailable("未找到 ADB 程序，请确认已安装 Android 调试工具（platform-tools）")
         base = [str(self.adb_path)]
         flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
         subprocess.run(base + ["start-server"], capture_output=True, timeout=10, **flags)
@@ -396,6 +467,13 @@ class MobileProtocolReader:
             errors="replace", timeout=10, **flags
         )
         serial = select_adb_serial(result.stdout, self.adb_serial)
+        if not serial:
+            # MuMu Mac 的 adb 端口随实例重启动态变化：自动扫描 MuMuEmulator
+            # 进程监听端口并 connect，找到当前真实端口。
+            discovered = discover_mumu_macos_serial(self.adb_path)
+            if discovered:
+                self.adb_serial = discovered
+                serial = discovered
         if not serial and self.adb_serial and ":" in self.adb_serial:
             subprocess.run(base + ["connect", self.adb_serial], capture_output=True, timeout=10, **flags)
             result = subprocess.run(
@@ -404,7 +482,10 @@ class MobileProtocolReader:
             )
             serial = select_adb_serial(result.stdout, self.adb_serial)
         if not serial:
-            raise MobileProtocolUnavailable("未发现已启动的 MuMu 模拟器，请先打开模拟器")
+            raise MobileProtocolUnavailable(
+                "未检测到在线设备（adb 设备离线或未连接）。请确认模拟器/真机已开启 "
+                "USB 调试并已连接，且 config.yaml 的 mobile_protocol.adb_serial 正确。"
+            )
         self.adb_serial = serial
         return serial
 
@@ -412,6 +493,30 @@ class MobileProtocolReader:
         return self._adb(
             "shell", "pidof", "frida-server", timeout=8, check=False
         ).stdout.strip()
+
+    def _port_listening(self, port: int) -> bool:
+        """检查模拟器内指定端口是否处于监听态（用于判断是否被其他 frida-server 占用）。"""
+        hex_port = f"{port:04X}"
+        try:
+            out = self._adb("shell", "cat", "/proc/net/tcp", timeout=8, check=False).stdout
+        except MobileProtocolUnavailable:
+            return False
+        for line in out.splitlines():
+            parts = line.split()
+            # /proc/net/tcp 每行：sl local_address rem_address st ...
+            if len(parts) >= 4 and parts[1].upper().endswith(f":{hex_port}") and parts[3] == "0A":
+                return True
+        return False
+
+    def _pick_frida_port(self) -> int:
+        """选择 frida-server 端口：默认 27042；若被其他 frida-server 占用则 27043。
+
+        只在「本工具的 frida-server 未运行」时被调用（见 _ensure_frida_server），
+        因此只需判断默认端口是否被别的 frida-server（例如同类工具注入的版本）占用。
+        """
+        if self._port_listening(FRIDA_PORT):
+            return FRIDA_ALT_PORT
+        return FRIDA_PORT
 
     def _start_frida_server(self, report: Callable[[str], None]) -> str:
         launch_error: MobileProtocolUnavailable | None = None
@@ -424,8 +529,10 @@ class MobileProtocolReader:
                 "shell",
                 "sh",
                 "-c",
-                "/data/local/tmp/frida-server --daemonize "
-                "</dev/null >/dev/null 2>&1 &",
+                # 单引号包裹整条命令：adb shell 会把参数用空格重拼，若不引号，
+                # sh -c 只认第一个词为命令，--listen/--daemonize 会被吞成 sh 位置参数。
+                f"'/data/local/tmp/frida-server --listen 127.0.0.1:{self.frida_port} "
+                "--daemonize </dev/null >/dev/null 2>&1 &'",
                 timeout=10,
                 check=False,
             )
@@ -535,9 +642,27 @@ class MobileProtocolReader:
         report("MuMu 手机协议环境已就绪")
         return serial
 
+    def _ensure_frida_server(self) -> None:
+        """frida-server 未运行时自动部署（下载+推送+启动），幂等。
+
+        让任何入口（控制台 / 菜单栏 / 调度器）都不必先跑 launcher 也能连上，
+        冷启动（重启模拟器 / 换机器）后双击即可自愈。失败时不吞掉错误，
+        留给 _connect 后续的 _ensure_forward / 进程枚举报出真实原因。
+        """
+        try:
+            if self._frida_server_pid():
+                return
+        except MobileProtocolUnavailable:
+            return
+        try:
+            self.frida_port = self._pick_frida_port()
+            self.prepare_runtime(self.project_root / "downloads")
+        except MobileProtocolUnavailable:
+            pass
+
     def _ensure_forward(self) -> None:
         if not self.adb_path or not self.adb_path.is_file():
-            raise MobileProtocolUnavailable("未找到 MuMu 模拟器的 ADB")
+            raise MobileProtocolUnavailable("未找到 ADB 程序，请确认已安装 Android 调试工具（platform-tools）")
         self._resolve_device()
         try:
             subprocess.run(
@@ -546,8 +671,8 @@ class MobileProtocolReader:
                     "-s",
                     self.adb_serial,
                     "forward",
-                    "tcp:27042",
-                    "tcp:27042",
+                    f"tcp:{self.frida_port}",
+                    f"tcp:{self.frida_port}",
                 ],
                 check=True,
                 stdout=subprocess.DEVNULL,
@@ -557,6 +682,28 @@ class MobileProtocolReader:
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise MobileProtocolUnavailable("无法建立模拟器手机协议通道") from exc
+
+    def _ensure_qq_running(self) -> None:
+        """QQ 未启动时自动拉起（am start SplashActivity），轮询等进程出现。
+
+        对齐 qq-pet-copilot 的 opener 行为：模拟器刚开机/QQ 被关时，
+        自动启动 QQ 再注入，最多重试 3 轮启动。
+        """
+        for attempt in range(3):
+            self._adb(
+                "shell", "am", "start", "-n",
+                f"{self.process_name}/.activity.SplashActivity",
+                timeout=15, check=False,
+            )
+            for _ in range(10):
+                pid = self._adb(
+                    "shell", "pidof", self.process_name, timeout=8, check=False
+                ).stdout.strip()
+                if pid:
+                    return
+                time.sleep(1)
+            if attempt < 2:
+                time.sleep(2)
 
     def _disconnect(self) -> None:
         script, session = self._script, self._session
@@ -582,6 +729,8 @@ class MobileProtocolReader:
             except Exception:
                 self._disconnect()
 
+        # 冷启动自愈：frida-server 未运行则自动部署，再建立转发。
+        self._ensure_frida_server()
         self._ensure_forward()
         frida = self._load_frida()
         bundled_root = Path(getattr(sys, "_MEIPASS", self.project_root))
@@ -600,7 +749,7 @@ class MobileProtocolReader:
             raise MobileProtocolUnavailable("手机协议读取脚本不存在")
         try:
             manager = frida.get_device_manager()
-            device = manager.add_remote_device(self.endpoint)
+            device = manager.add_remote_device(f"127.0.0.1:{self.frida_port}")
             processes = device.enumerate_processes()
             process = next((item for item in processes if item.name == self.process_name), None)
             # MuMu may expose an Android app label (for example "QQ") instead
@@ -612,6 +761,17 @@ class MobileProtocolReader:
                 ).stdout.strip()
                 pids = {int(value) for value in pid_text.split() if value.isdigit()}
                 process = next((item for item in processes if item.pid in pids), None)
+            if process is None:
+                # QQ 未启动（模拟器刚开机/被关）：自动拉起后重新枚举进程
+                self._ensure_qq_running()
+                processes = device.enumerate_processes()
+                process = next((item for item in processes if item.name == self.process_name), None)
+                if process is None:
+                    pid_text = self._adb(
+                        "shell", "pidof", self.process_name, timeout=8, check=False
+                    ).stdout.strip()
+                    pids = {int(value) for value in pid_text.split() if value.isdigit()}
+                    process = next((item for item in processes if item.pid in pids), None)
             if process is None:
                 raise MobileProtocolUnavailable("模拟器 QQ 尚未启动或未登录")
             session = device.attach(process.pid)
@@ -788,16 +948,35 @@ class MobileProtocolReader:
         )
 
 
+def default_project_root() -> Path:
+    """项目根目录（源码运行 = 仓库根；打包后 = 用户数据目录）。
+
+    macOS 打包成 .app 后，config.yaml / runs / downloads 不能写在 .app 内部
+    （更新会丢、也难找），改放 ~/Library/Application Support/QQPetInterfaceCopilot；
+    其他平台 frozen 沿用 exe 同目录的便携式约定。
+    """
+    if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            return (
+                Path.home()
+                / "Library"
+                / "Application Support"
+                / "QQPetInterfaceCopilot"
+            )
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
 def reader_from_config(config: dict, project_root: str | Path | None = None) -> MobileProtocolReader | None:
     settings = config.get("mobile_protocol") or {}
     if not bool(settings.get("enabled", False)):
         return None
-    root = Path(project_root or Path(__file__).resolve().parent.parent)
+    root = Path(project_root or default_project_root())
     adb_setting = str(settings.get("adb_path") or "").strip()
     adb_path = discover_adb_path(root, adb_setting)
     key = (
         str(root),
-        str(settings.get("endpoint", "127.0.0.1:27042")),
+        str(settings.get("endpoint", f"127.0.0.1:{FRIDA_PORT}")),
         str(settings.get("process_name", "com.tencent.mobileqq")),
         str(adb_path),
         str(settings.get("adb_serial", "127.0.0.1:16416")),
