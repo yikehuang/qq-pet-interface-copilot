@@ -1542,6 +1542,23 @@ class Scheduler:
             hired_friend = self._select_work_hire(client, config)
             hired_uin = hired_friend.user_id if hired_friend else ""
             hired_pet_id = hired_friend.pet_id if hired_friend else ""
+            # 雇佣好友时，岗位的 can_do 取决于「我的宠物 + 好友宠物」的组合状态：
+            # 同一职业对某个好友可能全部不可做（如该好友今日已被雇佣过）。此时应
+            # 回退到无好友打工，而不是把整轮打工判定为失败并进入冷却。
+            if hired_pet_id:
+                try:
+                    client.select_work_job(0, 0, strategy, hired_pet_id)
+                except QQPetError:
+                    friend_name = (
+                        hired_friend.nickname
+                        or hired_friend.pet_name
+                        or hired_friend.user_id
+                    )
+                    self.log(
+                        f"雇佣好友 {friend_name} 时无可用岗位，本轮改为无好友打工"
+                    )
+                    hired_uin = ""
+                    hired_pet_id = ""
             selected_job = None
             if preferred_job:
                 try:
