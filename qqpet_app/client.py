@@ -1717,12 +1717,23 @@ class NapCatClient:
         root = parse_message(response)
         detail_raw = first_bytes(root, 1)
         detail = parse_message(detail_raw) if detail_raw else {}
+        duration_seconds = first_varint(detail, 3)
+        started_at = first_varint(detail, 4)
+        remaining_seconds = first_varint(detail, 2)
+        # 服务器在任务进行中往往不返回 remaining（detail 只有 field 3=时长、
+        # field 4=开始时间），硬读 field 2 恒为 0 会误判 finished、提前结算
+        # 被服务器拒绝（135004 结算条件不满足）。有 started_at + duration 时
+        # 用它们推算真实剩余时间，任务已结束则自然为 0。
+        if duration_seconds > 0 and started_at > 0:
+            remaining_seconds = max(
+                0, started_at + duration_seconds - int(time.time())
+            )
         return StoryStatus(
             story_id=first_string(root, 2),
             state_code=first_varint(detail, 1),
-            remaining_seconds=first_varint(detail, 2),
-            duration_seconds=first_varint(detail, 3),
-            started_at=first_varint(detail, 4),
+            remaining_seconds=remaining_seconds,
+            duration_seconds=duration_seconds,
+            started_at=started_at,
             recallable=bool(first_varint(detail, 5)),
             raw_body=response,
         )
