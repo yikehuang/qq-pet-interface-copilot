@@ -1414,6 +1414,89 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertIsNotNone(selected)
             self.assertEqual(selected.user_id, "10001")
 
+    def test_user_fixed_work_job_overrides_optimizer_suggestion(self) -> None:
+        # 用户在设置中固定了岗位 A（浅梦行者），而优化器建议岗位 B（店铺守护结界，
+        # 因资金不足走「单位时间金币最高」分支）。调度器必须执行用户固定的岗位 A，
+        # 而非被优化器建议旁路（先前 bug：优化器结果被当作指定岗位强制优先）。
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["scheduler"]["coin_threshold"] = 500
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            config["optimization"]["enabled"] = True
+            config["work"]["career_type"] = 2
+            config["work"]["job_sub_event"] = 6411004  # 浅梦行者（用户固定）
+            store.save(config)
+
+            class FakeClient:
+                def query_values(self):
+                    return PetValues(gold=1, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def query_pk_friend_candidates(self):
+                    return ()
+
+                def query_work_catalog(self, _hired_pet_id=""):
+                    from qqpet_app.client import WorkCareer, WorkCatalog, WorkOverview
+
+                    jobs = [
+                        WorkJob(2, "职业甲", "浅梦行者", 6411004, "金币 21", "10分钟", can_do=True),
+                        WorkJob(1, "职业乙", "店铺守护结界", 64001, "金币 77", "10分钟", can_do=True),
+                    ]
+                    return WorkCatalog(
+                        WorkOverview(careers=(), current_career_type=0),
+                        jobs,
+                        [],
+                    )
+
+                def query_work_jobs(self, _career_type, _hired_pet_id=""):
+                    return [
+                        WorkJob(2, "职业甲", "浅梦行者", 6411004, "金币 21", "10分钟", can_do=True),
+                    ]
+
+                def select_work_job(
+                    self, _career_type, preferred_sub_event, _strategy,
+                    _hired_pet_id, excluded_sub_events=(),
+                ):
+                    wanted = int(preferred_sub_event)
+                    match = next(
+                        (job for job in self.query_work_jobs(0)
+                         if job.sub_event_type == wanted),
+                        None,
+                    )
+                    if match is None:
+                        raise QQPetError(f"指定岗位 {wanted} 暂不可用")
+                    return match
+
+                started = None
+
+                def start_work(self, career_type, sub_event, *_args):
+                    self.started = (career_type, sub_event)
+                    return WorkStartResult(
+                        WorkJob(
+                            career_type, "职业", "岗位", sub_event,
+                            "金币 21", "10分钟", can_do=True,
+                        ),
+                        "6400_solo",
+                        hired_friend=False,
+                    )
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml", root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "work")
+            # 必须执行用户固定的浅梦行者（6411004），而非优化器建议的店铺守护结界（64001）。
+            self.assertEqual(fake.started, (2, 6411004))
     def test_manual_work_hire_uses_configured_friend(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
