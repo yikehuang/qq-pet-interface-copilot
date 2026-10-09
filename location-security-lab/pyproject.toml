@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "location-security-lab"
+version = "0.1.0"
+description = "Authorized location-integrity research lab with multi-signal risk scoring"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "pydantic>=2.8",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+include = ["location_security*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
