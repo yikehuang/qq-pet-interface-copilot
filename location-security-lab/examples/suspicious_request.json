@@ -1,0 +1,36 @@
+{
+  "current": {
+    "latitude": 31.230416,
+    "longitude": 121.473701,
+    "timestamp_ms": 1800000030000,
+    "accuracy_m": 8.0
+  },
+  "previous": {
+    "latitude": 51.4545,
+    "longitude": -2.5879,
+    "timestamp_ms": 1800000000000,
+    "accuracy_m": 10.0
+  },
+  "network": {
+    "server_ip_geo": {
+      "latitude": 51.5074,
+      "longitude": -0.1278,
+      "timestamp_ms": 1800000030000
+    },
+    "wifi_consistent_with_claimed_area": false,
+    "cell_consistent_with_claimed_area": false
+  },
+  "device": {
+    "mock_location": true,
+    "emulator_detected": true,
+    "root_detected": true,
+    "hook_risk_detected": false,
+    "meets_basic_integrity": false,
+    "meets_device_integrity": false,
+    "meets_strong_integrity": false
+  },
+  "sensors": {
+    "stationary": true,
+    "motion_score": 0.0
+  }
+}
